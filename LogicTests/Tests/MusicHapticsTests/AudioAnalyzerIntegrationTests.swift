@@ -1,0 +1,1 @@
+../../../Music HapticsTests/AudioAnalyzerIntegrationTests.swift

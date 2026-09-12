@@ -1,0 +1,1 @@
+../../../Music Haptics/Haptics/HapticPatternGenerator.swift

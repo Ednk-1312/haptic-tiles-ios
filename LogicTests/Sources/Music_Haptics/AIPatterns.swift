@@ -1,0 +1,1 @@
+../../../Music Haptics/AI/AIPatterns.swift

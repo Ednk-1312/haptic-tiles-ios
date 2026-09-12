@@ -1,0 +1,25 @@
+{
+  "configurations" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000001",
+      "name" : "Configuration 1",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "language" : "en",
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Music Haptics.xcodeproj",
+        "identifier" : "000000000000000100000002",
+        "name" : "Music HapticsTests"
+      }
+    }
+  ],
+  "version" : 1
+}

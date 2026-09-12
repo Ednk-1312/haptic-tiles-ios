@@ -1,0 +1,1 @@
+../../../Music Haptics/Visuals/ArtworkPalette.swift

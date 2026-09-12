@@ -1,0 +1,29 @@
+{
+  "trainingDataVersion": "synth-v2-2026-09-05",
+  "featureSchemaVersion": 1,
+  "difficulty": {
+    "modelVersion": 1,
+    "featureCount": 16,
+    "trainingRecordCount": 834,
+    "evaluation": {
+      "mae": 0.0231,
+      "rmse": 0.0363,
+      "correlation": 0.9996,
+      "note": "held-out song-disjoint validation vs deterministic difficulty"
+    }
+  },
+  "eventRanking": {
+    "modelVersion": 1,
+    "featureCount": 16,
+    "trainingRecordCount": 189172,
+    "evaluation": {
+      "mae": 0.2313,
+      "rmse": 0.3354,
+      "auc": 0.9211,
+      "precisionAt05": 0.4155,
+      "recallAt05": 1.0,
+      "agreement": 0.8162,
+      "note": "held-out song-disjoint validation vs deterministic selection"
+    }
+  }
+}
