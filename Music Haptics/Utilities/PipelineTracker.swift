@@ -34,8 +34,19 @@ struct PipelineTracker: Sendable {
 
     /// True only when `token` is the LATEST run for `id` — and the token was
     /// issued for `id` in the first place.
+    ///
+    /// Generation 0 means "no run has begun" (the value `current(for:)`
+    /// reports for an unseen song). Such an observation token must validate
+    /// while the counter is still absent or still zero — otherwise every
+    /// ensure-chart call that runs before any pipeline of the session fails
+    /// its currency check forever, exhausts its retries, and surfaces as a
+    /// raw CancellationError (the "brief loading, then back home" bug).
     func isCurrent(_ token: PipelineToken, for id: UUID) -> Bool {
-        token.songID == id && counters[id] == token.generation
+        guard token.songID == id else { return false }
+        if token.generation == 0 {
+            return (counters[id] ?? 0) == 0
+        }
+        return counters[id] == token.generation
     }
 
     /// Latest generation for `id` (0 when nothing has run). Used to build a

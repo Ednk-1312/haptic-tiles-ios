@@ -518,9 +518,22 @@ struct LibraryView: View {
         isDemoPreparing = true
         Task {
             defer { isDemoPreparing = false }
-            if let result = await appState.demoSession() {
+            do {
+                let result = try await appState.prepareDemoSession()
                 demoRecord = result.record
                 demoSession = result.session
+                #if DEBUG
+                print("[Auto] demo session ready — presenting \(result.session.title)")
+                #endif
+            } catch {
+                // The automation path must fail LOUDLY (same alert as the
+                // manual button) — a silent bounce-back here cost a real
+                // debugging session once already.
+                #if DEBUG
+                print("[Auto] demo failed: \(error)")
+                #endif
+                homeErrorMessage = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
             }
         }
     }

@@ -523,15 +523,19 @@ final class AppState {
         // started while we were loading/generating) must never survive on
         // disk — otherwise it would be indistinguishable from a fresh one.
         // Bounded retry: a superseded run deletes its own output and retries
-        // once the newer run has finished; genuinely contended calls throw
-        // CancellationError (callers treat it as benign, never as a failure
-        // of the song).
-        for _ in 0..<3 {
+        // once the newer run has finished. The FINAL attempt always completes:
+        // its chart is deterministic output from a valid analysis, and any
+        // genuinely newer pipeline rewrites every difficulty's chart on
+        // completion — so bouncing the caller with a raw CancellationError
+        // (the old behavior) only ever produced a silent "loading, then back
+        // home" failure with no benefit.
+        for attempt in 0..<3 {
+            let isFinalAttempt = attempt == 2
             let token = PipelineToken(songID: record.id, generation: currentGeneration(for: record.id))
             let analysis = try await analysisOrLoad(songID: record.id, existing: nil)
             // A newer run started while we loaded: retry against the new
             // analysis instead of generating from a possibly-stale one.
-            guard isCurrent(token, for: record.id) else { continue }
+            guard isCurrent(token, for: record.id) || isFinalAttempt else { continue }
             let seed = Self.seed(for: record.id, difficulty: difficulty)
             ai.config = settings.aiFusionConfig
             let output = try await ChartGenerator().generate(
@@ -543,9 +547,12 @@ final class AppState {
             try await Task.detached {
                 try ChartStorage.save(outputChart, for: outputSongID)
             }.value
-            // A newer run started while we generated: our chart derives from
-            // a possibly-stale analysis — delete it and retry.
-            guard isCurrent(token, for: record.id) else {
+            // A newer run started while we generated: on any non-final attempt
+            // our chart derives from a possibly-stale analysis — delete it and
+            // retry. On the final attempt we keep the chart: the newer run
+            // overwrites all charts when it finishes, and returning a working
+            // session beats failing the user's Start press.
+            guard isCurrent(token, for: record.id) || isFinalAttempt else {
                 let staleSongID = record.id
                 Task.detached {
                     ChartStorage.deleteChart(for: staleSongID, difficulty: difficulty)
@@ -558,10 +565,9 @@ final class AppState {
             try? context.save()
             return output.chart
         }
-        // Still contended after the bounded retries: report a benign
-        // cancellation — the song is fine, the caller simply asked at the
-        // wrong moment.
-        throw CancellationError()
+        // Unreachable (the final attempt always returns); kept as a typed
+        // guard so the compiler sees an exhaustive path.
+        throw PipelineCoordinatorError.failed("The chart could not be prepared. Try again.")
     }
 
     /// Cached charts for every generated difficulty (fast file reads for the
@@ -824,12 +830,16 @@ final class AppState {
     /// Throwing demo entry point used by the product home screen. Unlike the
     /// old DEBUG-only button, this reports a real failure to the UI instead of
     /// silently returning to the same screen after a brief spinner.
+    ///
+    /// ONE pipeline owner: `createDemoSong` already resets a failed/protected
+    /// record through `runPipeline`. Starting a second run here superseded
+    /// the first, the chart generation hit its contention guard, and the
+    /// session threw a raw CancellationError — the “brief loading, then back
+    /// to the home screen” bug. `prepareSession` below waits on whatever
+    /// single run is active, whatever state the record is in.
     func prepareDemoSession() async throws -> (record: SongRecord, session: GameSession) {
         guard let record = await createDemoSong() else {
             throw PipelineCoordinatorError.failed("The built-in demo audio could not be created on this device.")
-        }
-        if record.analysisState == .failed || record.analysisState == .protected {
-            runPipeline(for: record)
         }
         let session = try await prepareSession(for: record, difficulty: demoDifficulty,
                                                practice: demoPracticeConfiguration())

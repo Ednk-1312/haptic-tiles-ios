@@ -169,4 +169,55 @@ final class PipelineTrackerTests: XCTestCase {
         let a = await store.record(songA)
         XCTAssertEqual(a?.analysisLabel, "A-slow", "A's work lands on A's own record")
     }
+
+    // MARK: - Observation tokens (generation 0)
+
+    /// Regression for the "brief loading, then back home" bug: ensure-chart
+    /// builds a READ-ONLY observation token via `current(for:)`, which reports
+    /// 0 when no pipeline has run for the song this session. A generation-0
+    /// token must validate while no run has begun — otherwise every
+    /// regeneration requested before the first pipeline of the launch fails
+    /// its currency check forever, exhausts its retries, and dies as a raw
+    /// CancellationError.
+    func testObservationTokenValidatesBeforeAnyRun() {
+        let tracker = PipelineTracker()
+        let song = UUID()
+
+        // No run has begun: the observation token is current.
+        let observation = PipelineToken(songID: song, generation: tracker.current(for: song))
+        XCTAssertEqual(observation.generation, 0, "current(for:) reports 0 for an unseen song")
+        XCTAssertTrue(tracker.isCurrent(observation, for: song),
+                      "a generation-0 observation token must validate while no run has begun")
+    }
+
+    /// A generation-0 observation token must STOP being current the moment a
+    /// real run begins (counter 0 → 1) — the observation's purpose is to
+    /// detect exactly that supersession.
+    func testObservationTokenInvalidatedByNewRun() {
+        var tracker = PipelineTracker()
+        let song = UUID()
+        let observation = PipelineToken(songID: song, generation: tracker.current(for: song))
+
+        _ = tracker.begin(for: song)
+        XCTAssertFalse(tracker.isCurrent(observation, for: song),
+                       "a real run supersedes a pre-run observation")
+    }
+
+    /// A run token (generation ≥ 1) must NEVER validate as generation 0 —
+    /// and cross-song validation stays forbidden for observation tokens too.
+    func testObservationTokenCrossSongAndRunTokens() {
+        var tracker = PipelineTracker()
+        let songA = UUID(), songB = UUID()
+        let observationB = PipelineToken(songID: songB, generation: tracker.current(for: songB))
+
+        XCTAssertFalse(tracker.isCurrent(observationB, for: songA),
+                       "observation tokens stay song-bound")
+
+        let runA = tracker.begin(for: songA)
+        XCTAssertTrue(tracker.isCurrent(runA, for: songA))
+        XCTAssertFalse(tracker.isCurrent(runA, for: songB))
+        // Generation 0 never equals a real run's generation.
+        XCTAssertFalse(tracker.isCurrent(PipelineToken(songID: songA, generation: 0), for: songA),
+                       "run began — generation-0 token for the same song is stale")
+    }
 }
