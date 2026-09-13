@@ -85,6 +85,10 @@ struct GamePlayfieldView: View {
                 drawMisses(context, size: canvasSize, time: t)
                 drawHoldPopups(context, size: canvasSize, time: t)
             }
+            // Gameplay is a continuous animation; hint Core Animation to
+            // prioritize the frame cadence instead of discovering it after a
+            // few stuttering frames.
+            .drawingGroup()
             .onAppear {
                 #if DEBUG
                 print(String(format: "[Playfield] canvas %.1f x %.1f pt → lane width %.1f pt (W/4)",
@@ -343,8 +347,13 @@ struct GamePlayfieldView: View {
 
     /// A hold in the reference style: a long black tile whose length IS the
     /// duration, with a white center beam and a ring at the tail (the
-    /// release point). Being sustained turns the consumed region into a
-    /// bright lane-color fill with a pulsing ring riding the tail boundary.
+    /// release point). Sustaining fills the consumed portion of the tile with
+    /// lane color — the visible fill equals the fraction actually held
+    /// (0…1 of the note's own span), so partial holds read honestly.
+    ///
+    /// All decorations (tail ring, boundary marker) are CLAMPED INSIDE the
+    /// tile body: the old ring was stroked at `rect.maxY` with an unclamped
+    /// radius, so it visibly poked below the tile onto the lane.
     private func drawHold(_ context: GraphicsContext, note: ChartNote, judged: Judgment?,
                           time: Double, x: CGFloat, width: CGFloat,
                           hitY: CGFloat, travel: CGFloat, lead: Double) {
@@ -372,36 +381,29 @@ struct GamePlayfieldView: View {
             context.fill(path, with: .color(laneTop(note.lane).opacity(fade)))
             return
         }
+
         if engine.holdActive(lane: note.lane) {
-            // Being sustained: the head is at the hit line and the tail is
-            // still above it, sliding down. Bright consumed region below the
-            // tail, progress marker riding the boundary, and a glowing ring
-            // at the apex of the active region.
-            let tailY = min(bottomY, hitY + travel)
-            let activeRect = CGRect(x: x, y: tailY, width: width,
-                                    height: max(14, (hitY + 10) - tailY))
-            let activePath = Path(roundedRect: activeRect, cornerRadius: corner)
-            let pulse = 0.8 + 0.2 * sin(time * 14)
-            let gradient = Gradient(colors: [laneTop(note.lane).opacity(0.9 + 0.1 * pulse),
-                                             laneBottom(note.lane).opacity(0.95 * pulse)])
-            context.fill(activePath, with: .linearGradient(gradient,
-                                                           startPoint: CGPoint(x: activeRect.midX, y: activeRect.minY),
-                                                           endPoint: CGPoint(x: activeRect.midX, y: activeRect.maxY)))
-            // Consumed region below the tail reads slightly brighter.
-            context.fill(activePath, with: .color(.white.opacity(0.10)))
-            // Progress boundary marker riding on the tail.
-            let marker = CGRect(x: x - 2, y: tailY - 1.5, width: width + 4, height: 3)
-            context.fill(Path(roundedRect: marker, cornerRadius: 1.5),
-                         with: .color(.white.opacity(0.95)))
-            // Pulsing white ring at the release point.
-            let ringR = width * 0.16 * (1 + 0.15 * pulse)
-            var ring = Path()
-            ring.addEllipse(in: CGRect(x: rect.midX - ringR, y: tailY - ringR,
-                                       width: ringR * 2, height: ringR * 2))
-            context.stroke(ring, with: .color(.white.opacity(0.75 + 0.25 * pulse)), lineWidth: 2.4)
-            context.stroke(activePath, with: .color(.white.opacity(0.65)), lineWidth: 1.4)
+            drawActiveHold(context, note: note, rect: rect, corner: corner,
+                           hitY: hitY, time: time)
             return
         }
+
+        // Released early: briefly show the honest fraction achieved before
+        // the tile fades out of view.
+        if let partial = engine.recordedHoldProgress(id: note.id), partial > 0, partial < 1 {
+            let fillFraction = CGFloat(partial)
+            let fillRect = CGRect(x: rect.minX,
+                                  y: rect.maxY - rect.height * fillFraction,
+                                  width: rect.width,
+                                  height: rect.height * fillFraction)
+            context.fill(path, with: .color(Color(red: 0.095, green: 0.095, blue: 0.12).opacity(0.5)))
+            if fillRect.height >= 2 {
+                context.fill(Path(roundedRect: fillRect, cornerRadius: corner),
+                             with: .color(laneTop(note.lane).opacity(0.55)))
+            }
+            return
+        }
+
         // Falling, unjudged: black tile + white center beam + tail ring
         // (the reference's long-note look).
         if headProgress > 1 { return }          // head not spawned yet
@@ -412,23 +414,90 @@ struct GamePlayfieldView: View {
         context.fill(path, with: .linearGradient(gradient,
                                                  startPoint: CGPoint(x: rect.midX, y: rect.minY),
                                                  endPoint: CGPoint(x: rect.midX, y: rect.maxY)))
-        // White beam down the center of the lane.
+        // White beam down the center of the lane, inset from the body edges.
         var beam = Path()
         beam.move(to: CGPoint(x: rect.midX, y: rect.minY + 3))
         beam.addLine(to: CGPoint(x: rect.midX, y: rect.maxY - 3))
         context.stroke(beam, with: .color(.white.opacity(0.72)),
                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
-        // Ring at the tail: the release point.
-        let ringR = width * 0.16
-        var ring = Path()
-        ring.addEllipse(in: CGRect(x: rect.midX - ringR, y: rect.maxY - ringR,
-                                   width: ringR * 2, height: ringR * 2))
-        context.stroke(ring, with: .color(.white.opacity(0.9)), lineWidth: 2.2)
+        // Ring at the tail (the release point) — clamped INSIDE the body.
+        drawClampedTailRing(context, midX: rect.midX, tailY: rect.maxY,
+                            width: width, bodyTop: rect.minY, bodyBottom: rect.maxY,
+                            radius: width * 0.16)
         // Faint sheen so the long key separates from the black lanes.
         let sheen = Path(roundedRect: CGRect(x: rect.minX + 5, y: rect.minY + 3,
                                              width: rect.width - 10, height: max(6, rect.height * 0.08)),
                          cornerRadius: corner * 0.5)
         context.fill(sheen, with: .color(.white.opacity(0.05)))
+    }
+
+    /// Sustain visualization: the fraction of the hold genuinely consumed
+    /// fills with lane color from the BOTTOM (the head) upward. The fill
+    /// boundary — and the release ring riding it — both stay inside the
+    /// tile body, so nothing bleeds onto the lane below.
+    private func drawActiveHold(_ context: GraphicsContext, note: ChartNote,
+                                rect: CGRect, corner: CGFloat,
+                                hitY: CGFloat, time: Double) {
+        _ = hitY
+        let fraction = CGFloat(min(1, max(0, engine.holdProgress(lane: note.lane) ?? 0)))
+        let fillHeight = rect.height * fraction
+        // Unconsumed remainder above the fill keeps the black piano look.
+        let bodyGradient = Gradient(colors: [
+            Color(red: 0.095, green: 0.095, blue: 0.12),
+            Color(red: 0.015, green: 0.015, blue: 0.028)
+        ])
+        context.fill(Path(roundedRect: rect, cornerRadius: corner),
+                     with: .linearGradient(bodyGradient,
+                                           startPoint: CGPoint(x: rect.midX, y: rect.minY),
+                                           endPoint: CGPoint(x: rect.midX, y: rect.maxY)))
+
+        // The consumed fill: from the head (bottom) up to the boundary.
+        let pulse = 0.8 + 0.2 * sin(time * 14)
+        if fillHeight >= 2 {
+            let fillRect = CGRect(x: rect.minX,
+                                  y: rect.maxY - fillHeight,
+                                  width: rect.width,
+                                  height: fillHeight)
+            // Clip to the rounded body so corners never leak.
+            var clipped = context
+            clipped.clip(to: Path(roundedRect: rect, cornerRadius: corner))
+            let gradient = Gradient(colors: [laneTop(note.lane).opacity(0.9 + 0.1 * pulse),
+                                             laneBottom(note.lane).opacity(0.95 * pulse)])
+            clipped.fill(Path(fillRect), with: .linearGradient(gradient,
+                                                               startPoint: CGPoint(x: fillRect.midX, y: fillRect.minY),
+                                                               endPoint: CGPoint(x: fillRect.midX, y: fillRect.maxY)))
+            clipped.fill(Path(fillRect), with: .color(.white.opacity(0.10)))
+            // Progress boundary marker riding the fill edge (inside the body).
+            let markerY = fillRect.minY
+            let marker = CGRect(x: rect.minX, y: markerY - 1.5, width: rect.width, height: 3)
+            context.fill(Path(roundedRect: marker, cornerRadius: 1.5),
+                         with: .color(.white.opacity(0.95)))
+            // Release ring rides the boundary — clamped inside the tile.
+            drawClampedTailRing(context, midX: rect.midX, tailY: markerY,
+                                width: rect.width, bodyTop: rect.minY, bodyBottom: rect.maxY,
+                                radius: rect.width * 0.16 * (1 + 0.15 * pulse))
+        }
+        // Crisp outline so the active hold reads as ONE object.
+        context.stroke(Path(roundedRect: rect, cornerRadius: corner),
+                       with: .color(.white.opacity(0.65)), lineWidth: 1.4)
+    }
+
+    /// White ring marker at a hold's tail, clamped entirely inside the tile
+    /// body. `tailY` is the ideal ring center; the drawn circle is pushed up
+    /// so it never extends past `bodyBottom` (the head end) or above
+    /// `bodyTop` — the old unclamped ring visibly sat outside the tile.
+    private func drawClampedTailRing(_ context: GraphicsContext, midX: CGFloat,
+                                     tailY: CGFloat, width: CGFloat,
+                                     bodyTop: CGFloat, bodyBottom: CGFloat,
+                                     radius: CGFloat) {
+        let r = min(radius, width * 0.28)
+        let maxCenter = bodyBottom - r * 0.55
+        let minCenter = bodyTop + r * 0.55
+        let cy = min(max(tailY, minCenter), maxCenter)
+        guard bodyBottom - cy > 0, cy - bodyTop > 0 else { return }
+        var ring = Path()
+        ring.addEllipse(in: CGRect(x: midX - r, y: cy - r, width: r * 2, height: r * 2))
+        context.stroke(ring, with: .color(.white.opacity(0.9)), lineWidth: 2.2)
     }
 
     // MARK: - Debug lane boundaries (DEBUG-only visual)

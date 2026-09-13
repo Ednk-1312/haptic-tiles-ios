@@ -26,19 +26,32 @@ enum HoldState: String, Sendable, Equatable {
 /// testable. One active hold per lane; `cancelAll` clears everything (pause,
 /// restart, song change) so no stale hold state ever survives a transition.
 struct HoldTracker: Sendable {
-    /// A hold being sustained: the finger is down past its head.
+    /// A hold being sustained: the finger is down on the note.
     struct Active: Sendable {
         let index: Int        // scheduler index
         let noteID: Int
         let lane: Int
-        let startTime: Double // audio time the head was hit
-        let endTime: Double   // audio time of the tail
+        let startTime: Double // audio time the finger began sustaining
+        let endTime: Double   // audio time of the musical tail
+    }
+
+    /// Result of lifting a finger from a hold. Keeping the measured progress
+    /// in the transition result is important: `release` removes the active
+    /// entry, so asking the tracker for progress afterwards would otherwise
+    /// always return nil/zero.
+    struct ReleaseResult: Sendable {
+        let hold: Active
+        let completed: Bool
+        let progress: Double
     }
 
     /// Lane → hold currently being sustained.
     private(set) var active: [Int: Active] = [:]
     /// Note id → explicit lifecycle state.
     private(set) var stateByNote: [Int: HoldState] = [:]
+    /// Final sustain fraction for notes that have left the active set. The
+    /// renderer uses this for a short, honest partial-release animation.
+    private(set) var progressByNote: [Int: Double] = [:]
 
     // MARK: - Transitions
 
@@ -51,6 +64,7 @@ struct HoldTracker: Sendable {
                           startTime: startTime, endTime: endTime)
         active[lane] = hold
         stateByNote[noteID] = .active
+        progressByNote.removeValue(forKey: noteID)
         return hold
     }
 
@@ -59,17 +73,21 @@ struct HoldTracker: Sendable {
     /// and whether it completed — removes it from the active set either way.
     @discardableResult
     mutating func release(lane: Int, at time: Double, grace: Double = 0.06)
-        -> (hold: Active, completed: Bool)? {
+        -> ReleaseResult? {
         guard let hold = active.removeValue(forKey: lane) else { return nil }
+        let sustained = progress(of: hold, at: time)
         let completed = time >= hold.endTime - grace
+        let finalProgress = completed ? 1 : sustained
         stateByNote[hold.noteID] = completed ? .completed : .releasedEarly
-        return (hold, completed)
+        progressByNote[hold.noteID] = finalProgress
+        return ReleaseResult(hold: hold, completed: completed, progress: finalProgress)
     }
 
     /// The finger is still down and the tail has arrived on the audio clock.
     mutating func complete(lane: Int) -> Active? {
         guard let hold = active.removeValue(forKey: lane) else { return nil }
         stateByNote[hold.noteID] = .completed
+        progressByNote[hold.noteID] = 1
         return hold
     }
 
@@ -77,6 +95,7 @@ struct HoldTracker: Sendable {
     mutating func markMissed(noteID: Int) {
         guard stateByNote[noteID] == nil else { return }
         stateByNote[noteID] = .missed
+        progressByNote[noteID] = 0
     }
 
     /// Pause / restart / song change / practice jump: drop every active hold
@@ -85,6 +104,7 @@ struct HoldTracker: Sendable {
     mutating func cancelAll() {
         active.removeAll()
         stateByNote.removeAll()
+        progressByNote.removeAll()
     }
 
     // MARK: - Queries
@@ -100,9 +120,21 @@ struct HoldTracker: Sendable {
     /// 0…1 fraction of the hold consumed at `time` (active holds only).
     func progress(lane: Int, at time: Double) -> Double? {
         guard let hold = active[lane] else { return nil }
+        return progress(of: hold, at: time)
+    }
+
+    /// Progress for an arbitrary active hold. The result is based on the
+    /// actual press start and the musical tail, so holding for half the span
+    /// produces half the completion rather than an all-or-nothing result.
+    func progress(of hold: Active, at time: Double) -> Double {
         let span = hold.endTime - hold.startTime
         guard span > 0 else { return 1 }
         return min(1, max(0, (time - hold.startTime) / span))
+    }
+
+    /// Final progress for a completed, released-early, or missed hold.
+    func recordedProgress(noteID: Int) -> Double? {
+        progressByNote[noteID]
     }
 
     func activeHold(lane: Int) -> Active? {

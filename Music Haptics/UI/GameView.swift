@@ -147,48 +147,57 @@ struct GameSessionView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            // Full-bleed gameplay layers: background + lanes span the entire
-            // physical screen (under the Dynamic Island) so the four-lane
-            // field renders identically on every device size.
-            GeometryReader { proxy in
+        // One root geometry contract owns the complete physical display. The
+        // old arrangement measured a nested GeometryReader before the
+        // full-screen expansion, which could hand the Canvas a half-width
+        // proposal on notched devices. The renderer and UIKit touch surface
+        // now receive this exact same, already-expanded size.
+        GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
+                // Quantized decorative inputs: the background only re-diffs
+                // when its values actually change, not on every 60 Hz clock
+                // publish. Without this the artwork layers churn every frame
+                // and the whole screen stutters under the diff load.
                 GameBackgroundView(theme: theme,
-                                   pulse: engine.beatPulse,
-                                   energy: engine.currentSectionEnergy,
+                                   pulse: (engine.beatPulse * 8).rounded() / 8,
+                                   energy: (engine.currentSectionEnergy * 8).rounded() / 8,
                                    sectionIndex: engine.currentSectionIndex,
                                    effects: settings.visualEffects)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
 
-                // Gameplay + input layers (below the HUD overlays). They always
-                // span the full screen edge-to-edge; lanes are computed from the
-                // actual measured container width (laneWidth = W / 4) so the
-                // field renders identically on every device size. Rendering and
-                // touch share the same geometry.
                 playfieldLayer(in: proxy.size)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
 
                 hudScrim
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea(.container)
+                    .frame(width: proxy.size.width, height: proxy.size.height,
+                           alignment: .top)
 
-            // HUD chrome (progress bar, score, pause, practice) sits OUTSIDE
-            // the full-bleed layer, so SwiftUI applies the real safe-area
-            // insets here — the Dynamic Island can never clip the score
-            // number again (it was being cut off at the top of the screen).
-            VStack(spacing: 0) {
-                topProgress
-                hud
-                Spacer()
-                if engine.isPractice {
-                    practiceBar
+                // Keep gameplay art edge-to-edge, but explicitly inset only the
+                // controls. This prevents the Dynamic Island from cropping
+                // the score while never shrinking the four-lane board.
+                VStack(spacing: 0) {
+                    topProgress
+                    hud
+                    Spacer()
+                    if engine.isPractice {
+                        practiceBar
+                    }
                 }
+                .padding(.top, proxy.safeAreaInsets.top)
+                .padding(.bottom, proxy.safeAreaInsets.bottom)
+                .frame(width: proxy.size.width, height: proxy.size.height,
+                       alignment: .top)
             }
-
-            if engine.state == .paused {
-                PauseOverlay(engine: engine) { dismiss() }
-            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .ignoresSafeArea(.container)
+            // Full-screen overlays live above the measured playfield layers.
+            // Keeping them in one overlay builder preserves the exact full-
+            // screen bounds the game measured above.
+            .overlay(alignment: .topLeading) {
+                if engine.state == .paused {
+                    PauseOverlay(engine: engine) { dismiss() }
+                }
 
             if engine.state == .finished, let result = engine.result, !resultsDismissed {
                 ResultsView(result: result,
@@ -234,7 +243,7 @@ struct GameSessionView: View {
             // whenever they change (updatesFrequently), so a screen-reader
             // user can check where the run stands at any moment.
             voiceOverStatus
-        }
+            }   // end .overlay content
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
         // Gameplay is fixed-layout by design (four full-width lanes); bound
@@ -455,11 +464,14 @@ struct GameSessionView: View {
                     Text(Format.compact(engine.scoreValue))
                         .font(.system(size: 48, weight: .heavy, design: .rounded))
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.58)
+                        .frame(minWidth: 112)
                         .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
                     comboLine
                 }
-                .padding(.horizontal, 30)
-                .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
                 .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(.white.opacity(0.18), lineWidth: 1))
             } else {

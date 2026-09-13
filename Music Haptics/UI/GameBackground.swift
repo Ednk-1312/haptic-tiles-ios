@@ -275,13 +275,15 @@ struct GameBackgroundView: View {
                     .accessibilityHidden(true)
             }
             // Hero layer: enlarged/cropped artwork, slowly reacting to energy.
+            // Uses the quantized energy so the transform only changes when the
+            // section genuinely shifts — not every audio-clock tick.
             if effects != .off, let hero = theme.heroArtwork {
                 Image(uiImage: hero)
                     .resizable()
                     .scaledToFill()
-                    .opacity(reduceMotion ? 0.12 : 0.12 + 0.05 * energy)
-                    .scaleEffect(reduceMotion ? 1.12 : 1.12 + 0.05 * energy)
-                    .offset(y: reduceMotion ? 0 : CGFloat((energy - 0.5) * 10))
+                    .opacity(reduceMotion ? 0.12 : 0.12 + 0.05 * energyRounded)
+                    .scaleEffect(reduceMotion ? 1.12 : 1.12 + 0.05 * energyRounded)
+                    .offset(y: reduceMotion ? 0 : CGFloat((energyRounded - 0.5) * 10))
                     .accessibilityHidden(true)
             }
             // Reference-style wash: vivid blue at the top-left melting into

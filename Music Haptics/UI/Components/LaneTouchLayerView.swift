@@ -55,21 +55,17 @@ final class LaneTouchLayer: UIView {
         for touch in touches {
             guard let lane = lanesByTouch[touch] else { continue }
             let location = touch.location(in: self)
-            // A finger dragged out of the playfield no longer sustains its
-            // lane (release at the old lane would read as a random early
-            // release); drag INTO a lane starts sustaining it.
-            let currentLane = laneIndex(at: location)
-            if currentLane != lane {
+            // Keep a finger attached to the lane where it began. Small
+            // horizontal drift is normal when a player is sustaining a hold;
+            // changing lanes on every divider crossing was causing accidental
+            // early releases and made long notes feel like they vanished.
+            // Leaving the actual playfield still cancels the contact.
+            guard bounds.contains(location) else {
+                lanesByTouch.removeValue(forKey: touch)
                 onLaneUp?(lane)
-                if let currentLane {
-                    lanesByTouch[touch] = currentLane
-                    onLaneDown?(currentLane, normalized(location))
-                } else {
-                    lanesByTouch.removeValue(forKey: touch)
-                }
-            } else {
-                onLaneMove?(lane, normalized(location))
+                continue
             }
+            onLaneMove?(lane, normalized(location))
         }
     }
 

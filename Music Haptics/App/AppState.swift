@@ -67,6 +67,11 @@ final class AppState {
     /// identity is tracked by serial instead of `===`).
     private var pipelineTaskIDs: [UUID: Int] = [:]
 
+    /// Durable operation state for the UI. Views never infer progress from a
+    /// transient SwiftData enum or poll an object while an async task runs.
+    private var pipelineStatuses: [UUID: PipelineStatus] = [:]
+    private var pipelineStreams: [UUID: [UUID: AsyncStream<PipelineStatus>.Continuation]] = [:]
+
     private func startPipelineTask(for songID: UUID, _ body: @escaping @MainActor () async -> Void) {
         pipelineTasks[songID]?.cancel()
         let runID = (pipelineTaskIDs[songID] ?? 0) + 1
@@ -98,6 +103,50 @@ final class AppState {
     /// read-only token before async work that must not outlive a newer run.
     private func currentGeneration(for songID: UUID) -> Int {
         pipelineTracker.current(for: songID)
+    }
+
+    /// Latest durable preparation snapshot for a song.
+    func pipelineStatus(for songID: UUID) -> PipelineStatus {
+        pipelineStatuses[songID] ?? .idle
+    }
+
+    /// A cancellable status stream for one song. The first value is emitted
+    /// immediately, so a newly presented screen cannot miss a transition that
+    /// happened just before it appeared. Terminal states finish the stream.
+    func pipelineUpdates(for songID: UUID) -> AsyncStream<PipelineStatus> {
+        let streamID = UUID()
+        return AsyncStream { continuation in
+            let current = self.pipelineStatus(for: songID)
+            continuation.yield(current)
+            if !current.isActive {
+                continuation.finish()
+            } else {
+                self.pipelineStreams[songID, default: [:]][streamID] = continuation
+            }
+        }
+    }
+
+    private func publishPipeline(_ status: PipelineStatus, for songID: UUID) {
+        pipelineStatuses[songID] = status
+        pipelineStreams[songID]?.values.forEach { $0.yield(status) }
+        guard !status.isActive else { return }
+        pipelineStreams[songID]?.values.forEach { $0.finish() }
+        pipelineStreams[songID] = nil
+    }
+
+    /// Stops the current preparation cleanly. The record returns to an
+    /// importable state instead of remaining forever in an indeterminate
+    /// spinner state.
+    func cancelPipeline(for record: SongRecord) {
+        let songID = record.id
+        pipelineTasks[songID]?.cancel()
+        _ = beginPipeline(for: songID)
+        record.analysisState = .imported
+        record.errorMessage = nil
+        try? context.save()
+        publishPipeline(PipelineStatus(stage: .cancelled, progress: 0,
+                                       message: "Preparation cancelled", errorMessage: nil),
+                        for: songID)
     }
 
     /// Shown when a Music-library song's audio is protected/unavailable.
@@ -255,6 +304,7 @@ final class AppState {
         try? context.save()
         let songID = record.id
         let generation = beginPipeline(for: songID)
+        publishPipeline(.active(.resolvingAudio, progress: 0.02, message: "Opening audio"), for: songID)
 
         startPipelineTask(for: songID) { [weak self] in
             guard let self else { return }
@@ -266,6 +316,7 @@ final class AppState {
                     }
                     return
                 }
+                self.publishPipeline(.active(.analyzing, progress: 0.12, message: "Listening to the song"), for: songID)
                 let analysis = try await AudioAnalyzer().analyze(url: url)
                 // A superseded run must not write ANY files: saving its
                 // analysis would clobber the newer run's file, and deleting
@@ -279,10 +330,14 @@ final class AppState {
                 record.tempoBPM = analysis.tempoBPM
                 record.tempoConfidence = analysis.tempoConfidence
                 let summaryDifficulty = self.settings.autoDifficulty ? DifficultyLevel.medium : self.settings.preferredDifficulty
+                self.publishPipeline(.active(.designingChart, progress: 0.62, message: "Designing the chart"), for: songID)
                 // ONE shared analysis → every difficulty's chart (Easy … Extreme).
                 self.generateAllCharts(for: record, analysis: analysis,
                                        summaryDifficulty: summaryDifficulty,
                                        generation: generation)
+            } catch is CancellationError {
+                // Cancellation is a normal user action or a superseded run,
+                // never a failed song. The newest run owns the status.
             } catch {
                 if self.isCurrent(generation, for: songID) {
                     self.failPipeline(songID: songID,
@@ -309,6 +364,7 @@ final class AppState {
         }
         #endif
         try? context.save()
+        publishPipeline(.failed(record.errorMessage ?? "Audio is unavailable."), for: songID)
     }
 
     /// Honest, cause-specific explanation. DRM, cloud-only, missing-from-
@@ -349,9 +405,14 @@ final class AppState {
                 try Task.checkCancellation()
                 self.ai.config = self.settings.aiFusionConfig
                 var summary: Chart?
-                for difficulty in ChartStorage.generatedDifficulties {
+                let difficulties = ChartStorage.generatedDifficulties
+                for (index, difficulty) in difficulties.enumerated() {
                     guard self.isCurrent(gen, for: songID) else { return }
                     try Task.checkCancellation()
+                    self.publishPipeline(.active(.designingChart,
+                                                  progress: 0.62 + 0.34 * Double(index) / Double(difficulties.count),
+                                                  message: "Designing \(difficulty.displayName) chart"),
+                                         for: songID)
                     let seed = Self.seed(for: songID, difficulty: difficulty)
                     let output = try await ChartGenerator().generate(
                         analysis: analysis, songID: songID,
@@ -373,6 +434,10 @@ final class AppState {
                 record.difficultyScore = summary?.difficultyScore
                 record.errorMessage = nil
                 try? context.save()
+                self.publishPipeline(PipelineStatus(stage: .ready, progress: 1,
+                                                     message: "Ready to play", errorMessage: nil), for: songID)
+            } catch is CancellationError {
+                // A superseded generation is not a user-visible failure.
             } catch {
                 if self.isCurrent(gen, for: songID) {
                     self.failPipeline(songID: songID, message: (error as? LocalizedError)?.errorDescription ?? "Chart generation failed.")
@@ -711,9 +776,8 @@ final class AppState {
         id.uuidString.utf8.reduce(0) { ($0 &* 31) &+ UInt64($1) }
     }
 
-    // MARK: - Demo song (Debug builds)
+    // MARK: - Built-in demo song
 
-    #if DEBUG
     /// Creates (or reuses) the synthetic demo song and starts the normal
     /// analyze → chart pipeline. Used by the Developer section and the
     /// `-demoAutoplay` launch argument for Simulator visual testing.
@@ -721,11 +785,30 @@ final class AppState {
     /// audio can't be synthesized (storage failure) — the demo path degrades
     /// gracefully instead of crashing the app.
     @discardableResult
-    func createDemoSong() -> SongRecord? {
-        if let existing = fileRecord(named: DemoSongFactory.fileName) { return existing }
-        guard let url = try? DemoSongFactory.writeIfNeeded(to: AppDirectories.songsDirectory) else {
+    func createDemoSong() async -> SongRecord? {
+        let url: URL
+        do {
+            url = try await DemoSongFactory.writeIfNeededAsync(to: AppDirectories.songsDirectory)
+        } catch {
+            #if DEBUG
+            print("[Demo] audio synthesis failed: \(error.localizedDescription)")
+            #endif
             return nil
         }
+
+        if let existing = fileRecord(named: DemoSongFactory.fileName) {
+            // A previous interrupted launch may have left the demo record in a
+            // terminal failure state. The demo action is an explicit retry, so
+            // reset it through the same pipeline rather than leaving the home
+            // screen with a dead "Start" affordance.
+            if existing.audioURL != url || existing.analysisState == .failed || existing.analysisState == .protected {
+                existing.fileName = url.lastPathComponent
+                existing.duration = DemoSongFactory.duration
+                runPipeline(for: existing)
+            }
+            return existing
+        }
+
         let record = SongRecord(title: "Demo Groove",
                                 artist: "Haptic Piano",
                                 fileName: url.lastPathComponent,
@@ -738,10 +821,24 @@ final class AppState {
         return record
     }
 
-    /// Builds a playable session once the demo song is ready (launch-arg path).
+    /// Throwing demo entry point used by the product home screen. Unlike the
+    /// old DEBUG-only button, this reports a real failure to the UI instead of
+    /// silently returning to the same screen after a brief spinner.
+    func prepareDemoSession() async throws -> (record: SongRecord, session: GameSession) {
+        guard let record = await createDemoSong() else {
+            throw PipelineCoordinatorError.failed("The built-in demo audio could not be created on this device.")
+        }
+        if record.analysisState == .failed || record.analysisState == .protected {
+            runPipeline(for: record)
+        }
+        let session = try await prepareSession(for: record, difficulty: demoDifficulty,
+                                               practice: demoPracticeConfiguration())
+        return (record, session)
+    }
+
+    /// Compatibility wrapper for simulator-only visual test launch paths.
     func demoSession() async -> (record: SongRecord, session: GameSession)? {
-        guard let record = createDemoSong() else { return nil }
-        return await sessionForReadyRecord(record)
+        try? await prepareDemoSession()
     }
 
     /// `-demoFile <name>` launch-arg path: like `-demoAutoplay` but for a REAL
@@ -786,44 +883,80 @@ final class AppState {
             runPipeline(for: newRecord)
             record = newRecord
         }
-        return await sessionForReadyRecord(record)
-    }
-
-    /// Shared "wait for analysis → build playable session" step used by the
-    /// synthetic demo song AND real imported files (launch-arg paths).
-    private func sessionForReadyRecord(_ record: SongRecord)
-        async -> (record: SongRecord, session: GameSession)? {
-        for _ in 0..<900 {   // up to ~225 s for analysis + chart generation (long MP3s)
-            if record.analysisState == .ready { break }
-            if record.analysisState == .failed || record.analysisState == .protected {
-                print("[DemoFile] analysis failed: \(record.errorMessage ?? "unknown")")
-                return nil
-            }
-            try? await Task.sleep(for: .milliseconds(250))
-        }
-        guard record.analysisState == .ready,
-              let url = await resolveAudioURL(for: record),
-              let chart = try? await ensureChart(for: record, difficulty: demoDifficulty) else {
-            print("[DemoFile] session build failed")
+        do {
+            let session = try await prepareSession(for: record, difficulty: demoDifficulty,
+                                                   practice: demoPracticeConfiguration())
+            return (record, session)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            print("[DemoFile] preparation failed: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Prepares one playable session through the single app-level contract.
+    /// Every entry point (Home, song detail, queue, and demo) uses this method:
+    /// resolve audio → await the durable pipeline state → load the matching
+    /// chart. No view polls SwiftData or owns a second loading lifecycle.
+    func prepareSession(for record: SongRecord, difficulty: DifficultyLevel,
+                        practice: PracticeConfig? = nil) async throws -> GameSession {
+        if record.analysisState == .imported {
+            runPipeline(for: record)
+        } else if record.analysisState != .ready {
+            // Recover a non-terminal record whose in-memory status was lost
+            // (for example, the app was relaunched between SwiftData restore
+            // and pipeline publication). This prevents an infinite-looking
+            // start spinner with no producer left to finish it.
+            let status = pipelineStatus(for: record.id)
+            if !status.isActive && status.stage != .failed && status.stage != .cancelled {
+                runPipeline(for: record)
+            }
+        }
+        if record.analysisState != .ready {
+            let updates = pipelineUpdates(for: record.id)
+            for await status in updates {
+                try Task.checkCancellation()
+                switch status.stage {
+                case .ready:
+                    break
+                case .failed:
+                    throw PipelineCoordinatorError.failed(status.errorMessage ?? "The song could not be prepared.")
+                case .cancelled:
+                    throw PipelineCoordinatorError.cancelled
+                case .idle, .resolvingAudio, .analyzing, .designingChart:
+                    continue
+                }
+                if status.stage == .ready { break }
+            }
+        }
+        guard record.analysisState == .ready else {
+            throw PipelineCoordinatorError.failed(record.errorMessage ?? "The song is not ready yet.")
+        }
+        guard let url = await resolveAudioURL(for: record) else {
+            throw AudioUnavailableError.protected
+        }
+        let chart = try await ensureChart(for: record, difficulty: difficulty)
         let analysis = try? ChartStorage.loadAnalysis(for: record.id)
-        var practice = demoPracticeConfig
-        if practice != nil, let analysis, analysis.sections.indices.contains(demoPracticeSectionIndex) {
-            let s = analysis.sections[demoPracticeSectionIndex]
-            practice?.section = PracticeSection(id: s.index, label: s.label.displayName,
-                                                start: s.start, end: s.end, energy: s.energy)
+        return GameSession(chart: chart, analysis: analysis, audioURL: url,
+                           title: record.title, practice: practice)
+    }
+
+    private func demoPracticeConfiguration() -> PracticeConfig? {
+        var config = demoPracticeConfig
+        guard config != nil,
+              let record = fileRecord(named: DemoSongFactory.fileName),
+              let analysis = try? ChartStorage.loadAnalysis(for: record.id),
+              analysis.sections.indices.contains(demoPracticeSectionIndex) else {
+            return config
         }
-        if ProcessInfo.processInfo.arguments.contains("-demoQueue"), queue.entries.isEmpty {
-            // Demo the automatic-transition path: the same song queued at two
-            // difficulties follows the first session automatically.
-            queue.add(QueueEntry(songID: record.id, title: record.title, artist: record.artist,
-                                 difficulty: .easy))
-            queue.add(QueueEntry(songID: record.id, title: record.title, artist: record.artist,
-                                 difficulty: .expert))
-        }
-        return (record, GameSession(chart: chart, analysis: analysis, audioURL: url,
-                                    title: record.title, practice: practice))
+        let section = analysis.sections[demoPracticeSectionIndex]
+        config?.section = PracticeSection(id: section.index,
+                                           label: section.label.displayName,
+                                           start: section.start,
+                                           end: section.end,
+                                           energy: section.energy)
+        return config
     }
 
     /// Practice options for `-demoAutoplay` runs: `-demoPracticeSpeed 0.5`,
@@ -874,7 +1007,6 @@ final class AppState {
         descriptor.fetchLimit = 1
         return try? context.fetch(descriptor).first
     }
-    #endif
 
     // MARK: - Deletion
 
@@ -935,6 +1067,7 @@ final class AppState {
         guard let record = fetchRecord(songID) else { return }
         record.analysisState = .failed
         record.errorMessage = message
+        publishPipeline(.failed(message), for: songID)
         #if DEBUG
         if let analysisError = error as? AnalysisError, let detail = analysisError.debugDetail {
             print("Audio analysis failed — \(detail)")

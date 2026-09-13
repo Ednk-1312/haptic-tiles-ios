@@ -18,9 +18,10 @@ struct LibraryView: View {
     @State private var quickPlayRecord: SongRecord?
     @State private var isPreparingQuickPlay = false
     @State private var homeErrorMessage: String?
-    #if DEBUG
     @State private var demoRecord: SongRecord?
     @State private var demoSession: GameSession?
+    @State private var isPreparingDemo = false
+    #if DEBUG
     /// `-demoPassive`: the demo song plays WITHOUT autoplay, so notes fall and
     /// miss — the Simulator visual-testing path for miss feedback.
     @State private var demoPassive = false
@@ -40,6 +41,10 @@ struct LibraryView: View {
             List {
                 Section {
                     homeStartCard
+                }
+
+                Section {
+                    demoGrooveRow
                 }
 
                 Section {
@@ -150,6 +155,7 @@ struct LibraryView: View {
                 }
 
                 #if DEBUG
+                #if DEBUG
                 Section("Developer") {
                     Button {
                         startDemoAutoplay()
@@ -162,6 +168,7 @@ struct LibraryView: View {
                     }
                     .disabled(isDemoPreparing)
                 }
+                #endif
                 #endif
             }
             .navigationTitle("Haptic Piano")
@@ -211,19 +218,16 @@ struct LibraryView: View {
         } message: {
             Text(homeErrorMessage ?? "Try opening the song and checking its audio status.")
         }
+        .sheet(isPresented: $showQueue) { QueueView() }
+        .fullScreenCover(item: $demoSession) { session in
+            if let record = demoRecord {
+                GameView(session: session, song: record, settings: settings)
+            }
+        }
         #if DEBUG
         .sheet(isPresented: $demoCalibration) {
             NavigationStack {
                 CalibrationView()
-            }
-        }
-        #endif
-        .sheet(isPresented: $showQueue) { QueueView() }
-        #if DEBUG
-        .fullScreenCover(item: $demoSession) { session in
-            if let record = demoRecord {
-                GameView(session: session, song: record, settings: settings,
-                         autoplay: !demoPassive)
             }
         }
         .fullScreenCover(item: $demoPreviewRecord) { record in
@@ -338,21 +342,87 @@ struct LibraryView: View {
         records.first { $0.analysisState == .ready }
     }
 
+    private var demoRecordForDisplay: SongRecord? {
+        records.first { $0.fileName == DemoSongFactory.fileName }
+    }
+
+    @ViewBuilder
+    private var demoGrooveRow: some View {
+        Button {
+            startDemoGroove()
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(.tertiarySystemBackground))
+                    Image(systemName: isPreparingDemo ? "waveform" : "play.fill")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                }
+                .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(isPreparingDemo ? "Preparing Demo Groove" : "Try Demo Groove")
+                        .font(.headline)
+                    Text(demoStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                if isPreparingDemo {
+                    ProgressView()
+                } else {
+                    Image(systemName: "chevron.forward")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .disabled(isPreparingDemo)
+        .accessibilityLabel(isPreparingDemo ? "Preparing Demo Groove" : "Play Demo Groove")
+        .accessibilityHint("A short built-in song that works without Music access or importing a file")
+    }
+
+    private var demoStatusText: String {
+        guard let record = demoRecordForDisplay else {
+            return "A short built-in song — no import required"
+        }
+        let status = appState.pipelineStatus(for: record.id)
+        if status.isActive { return status.message }
+        if status.stage == .failed { return status.errorMessage ?? "Tap to retry preparation" }
+        if record.analysisState == .ready { return "Ready to play · works offline" }
+        return record.analysisState.displayName
+    }
+
+    private func startDemoGroove() {
+        guard !isPreparingDemo else { return }
+        isPreparingDemo = true
+        homeErrorMessage = nil
+        Task {
+            defer { isPreparingDemo = false }
+            do {
+                let result = try await appState.prepareDemoSession()
+                demoRecord = result.record
+                demoSession = result.session
+            } catch is CancellationError {
+                // The user can tap Demo Groove again; no terminal state is shown.
+            } catch {
+                homeErrorMessage = UserFacingError.message(for: error,
+                                                            fallback: "Demo Groove could not be prepared. Tap it again to retry.")
+            }
+        }
+    }
+
     private func startQuickPlay(_ record: SongRecord) {
         guard !isPreparingQuickPlay else { return }
         isPreparingQuickPlay = true
         Task {
             defer { isPreparingQuickPlay = false }
             do {
-                guard let url = await appState.resolveAudioURL(for: record) else {
-                    throw AudioUnavailableError.protected
-                }
-                let chart = try await appState.ensureChart(for: record,
-                                                           difficulty: settings.preferredDifficulty)
-                let analysis = try? ChartStorage.loadAnalysis(for: record.id)
                 quickPlayRecord = record
-                quickPlaySession = GameSession(chart: chart, analysis: analysis,
-                                               audioURL: url, title: record.title)
+                quickPlaySession = try await appState.prepareSession(for: record,
+                                                                      difficulty: settings.preferredDifficulty)
             } catch is CancellationError {
                 // A concurrent regeneration superseded this request. The song
                 // remains intact and can be started again from its detail page.

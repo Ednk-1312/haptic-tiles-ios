@@ -129,6 +129,20 @@ final class GameEngine: ObservableObject {
     /// and what the player sees always agree. Subtle by design: the user's
     /// Note Speed setting dominates; the music adds the breathing.
     func dynamicLead(at time: Double) -> Double {
+        // The renderer evaluates this once per frame per tile. The median
+        // window scan is cheap but not free — cache by frame step so a single
+        // frame reuses one computation instead of recomputing per note.
+        if let cached = leadCache, abs(time - leadCacheTime) < 0.02 { return cached }
+        let lead = computeDynamicLead(at: time)
+        leadCache = lead
+        leadCacheTime = time
+        return lead
+    }
+
+    private var leadCache: Double?
+    private var leadCacheTime: Double = -1
+
+    private func computeDynamicLead(at time: Double) -> Double {
         guard let beats = analysis?.beats, !beats.isEmpty else { return approachTime }
         let globalBeatInterval: Double
         if let bpm = analysis?.tempoBPM, bpm > 20, bpm < 300 {
@@ -612,7 +626,7 @@ final class GameEngine: ObservableObject {
             // cursor still advances so we never rescan from zero every frame.
             if scheduler.judgment(for: autoplayCursor) == nil,
                let hit = judgeTap(lane: note.lane, at: note.time, point: CGPoint(x: 0.5, y: 1)) {
-                registerHoldIfNeeded(hit)
+                registerHoldIfNeeded(hit, at: note.time)
             }
             autoplayCursor += 1
         }
@@ -636,7 +650,7 @@ final class GameEngine: ObservableObject {
                                     judged: hit.map { scheduler?.judgment(for: $0.index) } ?? nil,
                                     deltaMs: hit.map { ($0.note.time - audioTime - settings.calibrationOffsetMs / 1000) * 1000 })
         #endif
-        if let hit { registerHoldIfNeeded(hit) }
+        if let hit { registerHoldIfNeeded(hit, at: audioTime) }
     }
 
     /// Tracks finger movement along its lane (raw touch layer). If the move
@@ -659,7 +673,7 @@ final class GameEngine: ObservableObject {
         guard distance <= PlayfieldGeometry.spatialCatchDistance else { return }
         let judgment = judge.classifyForgiving(tapTime: time, noteTime: candidate.note.time)
         apply(judgment, index: candidate.index, lane: lane, time: time, strength: candidate.note.strength)
-        if judgment != .miss { registerHoldIfNeeded((candidate.note, candidate.index)) }
+        if judgment != .miss { registerHoldIfNeeded((candidate.note, candidate.index), at: time) }
     }
 
     /// Handles a touch-up on a lane. Releases any active hold: at (or within
@@ -674,16 +688,18 @@ final class GameEngine: ObservableObject {
         if result.completed {
             completeHold(hold: result.hold, at: player.currentTime)
         } else {
-            bankPartialHold(hold: result.hold, at: player.currentTime)
+            // `release` has already removed the active hold. Pass its measured
+            // fraction through explicitly; querying the tracker now would
+            // incorrectly report zero and make every early release look empty.
+            bankPartialHold(hold: result.hold, progress: result.progress, at: player.currentTime)
         }
     }
 
     /// An early release banks the fraction of the hold actually sustained:
     /// proportional bonus, no combo break, note marked judged so the lane
     /// is never blocked by a stale hold.
-    private func bankPartialHold(hold: HoldTracker.Active, at time: Double) {
+    private func bankPartialHold(hold: HoldTracker.Active, progress: Double, at time: Double) {
         guard let scheduler else { return }
-        let progress = holds.progress(lane: hold.lane, at: time) ?? 0
         score.bankPartialHold(progress: progress)
         scheduler.mark(hold.index, judgment: .good, at: time)
         comboCount = score.comboCount
@@ -776,10 +792,18 @@ final class GameEngine: ObservableObject {
 
     /// Starts sustaining a hold after its head was hit: notStarted → active,
     /// plus a light "hold started" tick.
-    private func registerHoldIfNeeded(_ hit: (note: ChartNote, index: Int)) {
+    private func registerHoldIfNeeded(_ hit: (note: ChartNote, index: Int), at time: Double? = nil) {
         guard hit.note.type == .hold else { return }
+        let endTime = hit.note.time + hit.note.duration
+        // A spatial body press can happen before the head reaches the line.
+        // The hold must begin when the finger actually goes down, not at the
+        // future chart timestamp; otherwise the visible fill jumps forward and
+        // a short hold can appear to complete immediately. Autoplay still uses
+        // the exact head timestamp.
+        let pressTime = min(time ?? player.currentTime, endTime - 0.001)
+        guard pressTime < endTime else { return }
         holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
-                    startTime: hit.note.time, endTime: hit.note.time + hit.note.duration)
+                    startTime: pressTime, endTime: endTime)
         if let pattern = HapticPatternGenerator.holdStartPattern(profile: hapticProfile,
                                                                  enabled: settings.hapticsEnabled,
                                                                  strengthScale: settings.hapticStrength) {
@@ -818,6 +842,7 @@ final class GameEngine: ObservableObject {
     func holdActive(lane: Int) -> Bool { holds.isActive(lane: lane) }
     func holdCompleted(id: Int) -> Bool { holds.state(for: id) == .completed }
     func holdTailTime(lane: Int) -> Double? { holds.activeHold(lane: lane)?.endTime }
+    func recordedHoldProgress(id: Int) -> Double? { holds.recordedProgress(noteID: id) }
     /// Explicit lifecycle state for a note (notStarted default).
     func holdState(for noteID: Int) -> HoldState { holds.state(for: noteID) }
     /// 0…1 sustain progress while a hold is active (nil otherwise).
@@ -857,7 +882,7 @@ final class GameEngine: ObservableObject {
         // Hold completions: the finger (or autoplay) has sustained past the
         // tail on the audio clock.
         if !holds.active.isEmpty {
-            let due = holds.active.filter { t >= $0.value.endTime - 0.02 && (isAutoplay || touchesDown.contains($0.key)) }
+            let due = holds.active.filter { t >= $0.value.endTime && (isAutoplay || touchesDown.contains($0.key)) }
             for (lane, _) in due {
                 if let hold = holds.complete(lane: lane) {
                     completeHold(hold: hold, at: t)
@@ -914,8 +939,12 @@ final class GameEngine: ObservableObject {
             if beat.time >= t - 0.5 { fired = (beat.strength, beat.isStrong) }
             beatIndex += 1
         }
+        // Capped pulse rise: a strong beat no longer slams the whole background
+        // to full brightness in one frame (that read as a screen flash), and
+        // the decay below stays smooth.
         if let beat = fired {
-            beatPulse = beat.strong || beat.strength > 0.6 ? 1.0 : 0.35 * beat.strength
+            let target: Double = beat.strong || beat.strength > 0.6 ? 0.55 : 0.22 * beat.strength
+            beatPulse = min(target, beatPulse + 0.25)
         }
         beatPulse = max(0, beatPulse - 0.045)
         // Restart tracking after a restart/seek jump.

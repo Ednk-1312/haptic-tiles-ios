@@ -12,6 +12,7 @@ struct SongDetailView: View {
     @State private var session: GameSession?
     @State private var isPreparingGame = false
     @State private var showDeleteConfirm = false
+    @State private var pipelineStatus = PipelineStatus.idle
     @State private var errorMessage: String?
     @State private var showError = false
     @State private var probeReport: AudioProbeReport?
@@ -51,9 +52,17 @@ struct SongDetailView: View {
         .sheet(item: $probeReport) { report in
             AudioProbeView(report: report)
         }
-        .onAppear { reloadCharts() }
+        .onAppear {
+            reloadCharts()
+            pipelineStatus = appState.pipelineStatus(for: song.id)
+        }
         .onChange(of: song.analysisState) { _, _ in reloadCharts() }
         .onChange(of: song.chartVersion) { _, _ in reloadCharts() }
+        .task(id: song.id) {
+            for await status in appState.pipelineUpdates(for: song.id) {
+                pipelineStatus = status
+            }
+        }
         .onDisappear { previewPlayer.stop() }
         .confirmationDialog("Delete this song?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
@@ -132,13 +141,25 @@ struct SongDetailView: View {
                 }
                 .font(.subheadline)
             } else if song.analysisState == .analyzing || song.analysisState == .generatingChart {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text(song.analysisState == .analyzing
-                         ? "Analyzing audio on this device…"
-                         : "Designing your chart…")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text(pipelineStatus.message.isEmpty
+                             ? (song.analysisState == .analyzing ? "Analyzing audio on this device…" : "Designing your chart…")
+                             : pipelineStatus.message)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: pipelineStatus.progress)
+                        .tint(.accentColor)
+                    HStack {
+                        Text("You can leave this screen; preparation continues safely.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel") { appState.cancelPipeline(for: song) }
+                            .font(.caption.weight(.semibold))
+                    }
                 }
             } else {
                 Text("Waiting for analysis to begin…")
@@ -492,20 +513,15 @@ struct SongDetailView: View {
     }
 
     private func startGame() {
+        guard !isPreparingGame else { return }
+        isPreparingGame = true
         Task {
-            isPreparingGame = true
             defer { isPreparingGame = false }
             do {
-                guard let url = await appState.resolveAudioURL(for: song) else {
-                    throw AudioUnavailableError.protected
-                }
-                let chart = try await appState.ensureChart(for: song, difficulty: selectedDifficulty)
-                let analysis = (try? ChartStorage.loadAnalysis(for: song.id))
-                session = GameSession(chart: chart, analysis: analysis, audioURL: url, title: song.title)
+                session = try await appState.prepareSession(for: song,
+                                                             difficulty: selectedDifficulty)
             } catch is CancellationError {
-                // The chart build was superseded by a newer analysis/chart
-                // run for this song — benign, not an error; the user can
-                // simply press Play again.
+                // The user cancelled or a newer pipeline superseded this run.
             } catch AudioUnavailableError.protected {
                 errorMessage = AppState.unavailableMessage(for: song)
                 showError = true
@@ -539,13 +555,9 @@ struct SongDetailView: View {
             isPreparingGame = true
             defer { isPreparingGame = false }
             do {
-                guard let url = await appState.resolveAudioURL(for: song) else {
-                    throw AudioUnavailableError.protected
-                }
-                let chart = try await appState.ensureChart(for: song, difficulty: selectedDifficulty)
-                let analysis = (try? ChartStorage.loadAnalysis(for: song.id))
-                session = GameSession(chart: chart, analysis: analysis, audioURL: url,
-                                      title: song.title, practice: config)
+                session = try await appState.prepareSession(for: song,
+                                                             difficulty: selectedDifficulty,
+                                                             practice: config)
             } catch is CancellationError {
                 // Superseded by a newer pipeline — benign; press Practice again.
             } catch AudioUnavailableError.protected {

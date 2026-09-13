@@ -1,7 +1,6 @@
 import Foundation
 
-#if DEBUG
-/// DEBUG-only synthetic demo song: a ~28 s, 120 BPM energetic groove (kick,
+/// Built-in synthetic demo song: a ~28 s, 120 BPM energetic groove (kick,
 /// snare, hats, bassline, chord stabs) synthesized straight to a 16-bit WAV in
 /// the app's sandbox. Lets the game be demoed end-to-end in the Simulator —
 /// real analysis, real chart, real audio clock, real autoplay — without a
@@ -13,7 +12,16 @@ enum DemoSongFactory {
     static let fileName = "DemoSong-v2.wav"
     static let duration = 28.0
 
-    /// Synthesizes (or overwrites) the demo WAV deterministically.
+    /// Returns the cached demo WAV or creates it off the main actor.
+    /// The sample buffer is intentionally built in a detached task: generating
+    /// 28 seconds of PCM is real CPU work and must never block the home screen.
+    static func writeIfNeededAsync(to directory: URL) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            try writeIfNeeded(to: directory)
+        }.value
+    }
+
+    /// Synchronous worker used only from the detached generation task.
     static func writeIfNeeded(to directory: URL) throws -> URL {
         let url = directory.appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: url.path) { return url }
@@ -130,4 +138,3 @@ enum DemoSongFactory {
         try data.write(to: url)
     }
 }
-#endif
