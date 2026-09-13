@@ -29,6 +29,29 @@ struct SongBackgroundTheme: @unchecked Sendable {
     let particleSeed: UInt64
     /// Deterministic fallback (no artwork, or analysis failure).
     let isFallback: Bool
+    /// Genre/mood family resolved BEFORE gameplay (local metadata or a
+    /// cached lookup). Blended into the wash by the background view so the
+    /// atmosphere matches the song's character; neutral blends nothing.
+    let mood: GenreMood
+
+    init(topColor: Color, bottomColor: Color, accent: Color, metrics: ArtworkMetrics?,
+         energyTop: Color, energyBottom: Color, quietTop: Color, quietBottom: Color,
+         blurredArtwork: UIImage?, heroArtwork: UIImage?, particleSeed: UInt64,
+         isFallback: Bool, mood: GenreMood = .neutral) {
+        self.topColor = topColor
+        self.bottomColor = bottomColor
+        self.accent = accent
+        self.metrics = metrics
+        self.energyTop = energyTop
+        self.energyBottom = energyBottom
+        self.quietTop = quietTop
+        self.quietBottom = quietBottom
+        self.blurredArtwork = blurredArtwork
+        self.heroArtwork = heroArtwork
+        self.particleSeed = particleSeed
+        self.isFallback = isFallback
+        self.mood = mood
+    }
 }
 
 enum SongBackgroundThemeFactory {
@@ -46,16 +69,23 @@ enum SongBackgroundThemeFactory {
     private static let cache = SendableThemeCache()
 
     static func make(artworkData: Data?, seed: UInt64 = 0) -> SongBackgroundTheme {
+        make(artworkData: artworkData, seed: seed, mood: .neutral)
+    }
+
+    /// Mood-aware build: the artwork still drives the atmosphere, but the
+    /// genre wash tints it. Cache keys include the mood so a later, better
+    /// lookup naturally replaces a neutral-themed build.
+    static func make(artworkData: Data?, seed: UInt64, mood: GenreMood) -> SongBackgroundTheme {
         guard let data = artworkData, let image = UIImage(data: data) else {
-            let key = "fallback-\(seed)" as NSString
+            let key = "fallback-\(seed)-\(mood.rawValue)" as NSString
             if let cached = cache.object(forKey: key)?.theme { return cached }
-            let theme = buildFallback(seed: seed)
+            let theme = buildFallback(seed: seed, mood: mood)
             cache.setObject(ThemeBox(theme), forKey: key)
             return theme
         }
-        let key = "art-\(data.count)-\(stableHash(data))" as NSString
+        let key = "art-\(data.count)-\(stableHash(data))-\(mood.rawValue)" as NSString
         if let cached = cache.object(forKey: key)?.theme { return cached }
-        let theme = build(from: image, seed: seed)
+        let theme = build(from: image, seed: seed, mood: mood)
         cache.setObject(ThemeBox(theme), forKey: key)
         return theme
     }
@@ -66,50 +96,65 @@ enum SongBackgroundThemeFactory {
 
     // MARK: - Build
 
-    private static func build(from image: UIImage, seed: UInt64) -> SongBackgroundTheme {
+    private static func build(from image: UIImage, seed: UInt64, mood: GenreMood) -> SongBackgroundTheme {
         let pixels = rgbaPixels(image: image, target: CGSize(width: 24, height: 24))
         let metrics = pixels.flatMap { ArtworkPaletteAnalyzer.analyze(pixels: $0, width: 24) }
         let theme: SongBackgroundTheme
         if let metrics {
-            let top = liftForReadability(metrics.dominant)
-            let bottom = liftForReadability(metrics.secondary)
-            let accent = liftForReadability(metrics.accent)
+            // Mood and artwork each pull halfway: a rock song with a pastel
+            // cover still reads as a rock song, and a sad song with a red
+            // cover keeps some of its warmth.
+            let top = liftForReadability(blend(metrics.dominant, with: mood.top, strength: mood.tintStrength))
+            let bottom = liftForReadability(blend(metrics.secondary, with: mood.bottom, strength: mood.tintStrength))
+            let accent = liftForReadability(blend(metrics.accent, with: mood.accent, strength: mood.tintStrength * 0.6))
             theme = SongBackgroundTheme(
                 topColor: Color(top),
                 bottomColor: Color(bottom),
                 accent: Color(accent),
                 metrics: metrics,
-                energyTop: Color(liftForReadability(metrics.dominant.energetic)),
-                energyBottom: Color(liftForReadability(metrics.secondary.energetic)),
-                quietTop: Color(liftForReadability(metrics.dominant.quiet)),
-                quietBottom: Color(liftForReadability(metrics.secondary.quiet)),
+                energyTop: Color(liftForReadability(blend(metrics.dominant.energetic, with: mood.top, strength: mood.tintStrength))),
+                energyBottom: Color(liftForReadability(blend(metrics.secondary.energetic, with: mood.bottom, strength: mood.tintStrength))),
+                quietTop: Color(liftForReadability(blend(metrics.dominant.quiet, with: mood.top, strength: mood.tintStrength * 0.8))),
+                quietBottom: Color(liftForReadability(blend(metrics.secondary.quiet, with: mood.bottom, strength: mood.tintStrength * 0.8))),
                 blurredArtwork: blurred(image),
                 heroArtwork: heroCrop(image),
                 particleSeed: seed != 0 ? seed : stableHash(image),
-                isFallback: false)
+                isFallback: false,
+                mood: mood)
         } else {
-            theme = buildFallback(seed: seed)
+            theme = buildFallback(seed: seed, mood: mood)
         }
         return theme
     }
 
+    /// Pull `base` toward `moodColor` by `strength` (0…1) in RGB space.
+    private static func blend(_ base: RGB, with moodColor: RGB, strength: Double) -> RGB {
+        let s = min(1, max(0, strength))
+        return RGB(base.r + (moodColor.r - base.r) * s,
+                   base.g + (moodColor.g - base.g) * s,
+                   base.b + (moodColor.b - base.b) * s)
+    }
+
     /// No-artwork or analysis-failure path: fully deterministic per song,
-    /// never a broken image.
-    private static func buildFallback(seed: UInt64) -> SongBackgroundTheme {
+    /// never a broken image. The MOOD drives the palette here (no artwork to
+    /// fight), so the fallback background is the genre background.
+    private static func buildFallback(seed: UInt64, mood: GenreMood) -> SongBackgroundTheme {
         let (top, bottom, accent) = ArtworkPaletteAnalyzer.fallback(seed: seed)
+        let strength = mood == .neutral ? 0.55 : 0.72   // no artwork: mood leads
         return SongBackgroundTheme(
-            topColor: Color(liftForReadability(top)),
-            bottomColor: Color(liftForReadability(bottom)),
-            accent: Color(liftForReadability(accent)),
+            topColor: Color(liftForReadability(blend(top, with: mood.top, strength: strength))),
+            bottomColor: Color(liftForReadability(blend(bottom, with: mood.bottom, strength: strength))),
+            accent: Color(liftForReadability(blend(accent, with: mood.accent, strength: strength * 0.7))),
             metrics: nil,
-            energyTop: Color(liftForReadability(top.energetic)),
-            energyBottom: Color(liftForReadability(bottom.energetic)),
-            quietTop: Color(liftForReadability(top.quiet)),
-            quietBottom: Color(liftForReadability(bottom.quiet)),
+            energyTop: Color(liftForReadability(blend(top.energetic, with: mood.top, strength: strength))),
+            energyBottom: Color(liftForReadability(blend(bottom.energetic, with: mood.bottom, strength: strength))),
+            quietTop: Color(liftForReadability(blend(top.quiet, with: mood.top, strength: strength))),
+            quietBottom: Color(liftForReadability(blend(bottom.quiet, with: mood.bottom, strength: strength))),
             blurredArtwork: nil,
             heroArtwork: nil,
             particleSeed: seed,
-            isFallback: true)
+            isFallback: true,
+            mood: mood)
     }
 
     /// Dark colors are lifted so notes always read against the wash.

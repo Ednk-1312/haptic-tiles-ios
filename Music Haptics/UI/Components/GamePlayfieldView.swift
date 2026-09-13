@@ -62,28 +62,48 @@ struct GamePlayfieldView: View {
 
     private var playfieldContent: some View {
         GeometryReader { geo in
-            let t = engine.currentTime
-            Canvas { context, canvasSize in
-                drawLanes(context, size: canvasSize)
-                #if DEBUG
-                if engine.debugOverlayVisible {
-                    drawLaneBoundaries(context, size: canvasSize)
+            // Display-synchronized timeline: SwiftUI re-culls this subtree at
+            // the display's cadence (60/120 Hz) instead of the game Timer's
+            // cadence, so tile motion advances exactly one display refresh at
+            // a time with no beat/judder against the screen. The sampled time
+            // is the latency-compensated HEARD position — tiles land on what
+            // the player's ears tell them, not on the decoder's schedule.
+            // Logic (misses, holds, scoring) stays on the engine's Timer tick;
+            // only the pixels run here.
+            TimelineView(.animation) { timeline in
+                // Extrapolate the engine's logic-tick anchor at display
+                // cadence: audio(heard) at anchor + wall time since anchor ×
+                // playback rate. Paused/not-started sessions hold the anchor
+                // (no extrapolation) so nothing drifts while paused.
+                let now = timeline.date.timeIntervalSinceReferenceDate
+                let t: Double = {
+                    guard engine.state == .playing, engine.renderAnchorDate > 0 else {
+                        return engine.renderAnchorAudio
+                    }
+                    return engine.renderAnchorAudio + (now - engine.renderAnchorDate) * engine.clockRate
+                }()
+                Canvas { context, canvasSize in
+                    drawLanes(context, size: canvasSize)
+                    #if DEBUG
+                    if engine.debugOverlayVisible {
+                        drawLaneBoundaries(context, size: canvasSize)
+                    }
+                    if engine.debugChartMode {
+                        drawChartStructure(context, size: canvasSize, time: t)
+                    }
+                    #endif
+                    drawNotes(context, size: canvasSize, time: t)
+                    drawHitRegion(context, size: canvasSize, time: t)
+                    // Missed TAP tiles draw AFTER the hit region/shelf so their
+                    // red flash + collapse reads bright instead of being darkened
+                    // underneath the seating-shelf overlay.
+                    drawMissTiles(context, size: canvasSize, time: t)
+                    drawLaneFlashes(context, size: canvasSize, time: t)
+                    drawBursts(context, size: canvasSize, time: t)
+                    drawFeedback(context, size: canvasSize, time: t)
+                    drawMisses(context, size: canvasSize, time: t)
+                    drawHoldPopups(context, size: canvasSize, time: t)
                 }
-                if engine.debugChartMode {
-                    drawChartStructure(context, size: canvasSize, time: t)
-                }
-                #endif
-                drawNotes(context, size: canvasSize, time: t)
-                drawHitRegion(context, size: canvasSize, time: t)
-                // Missed TAP tiles draw AFTER the hit region/shelf so their
-                // red flash + collapse reads bright instead of being darkened
-                // underneath the seating-shelf overlay.
-                drawMissTiles(context, size: canvasSize, time: t)
-                drawLaneFlashes(context, size: canvasSize, time: t)
-                drawBursts(context, size: canvasSize, time: t)
-                drawFeedback(context, size: canvasSize, time: t)
-                drawMisses(context, size: canvasSize, time: t)
-                drawHoldPopups(context, size: canvasSize, time: t)
             }
             // Gameplay is a continuous animation; hint Core Animation to
             // prioritize the frame cadence instead of discovering it after a
@@ -798,7 +818,7 @@ struct GamePlayfieldView: View {
             let x = CGFloat(popup.lane) * width + width / 2
             let y = hitY - 96 - CGFloat(age) * 130
             let opacity = age < 0.6 ? 1.0 : 1.0 - (age - 0.6) / 0.15
-            let label = "+\\(popup.points) HOLD"
+            let label = "+\(popup.points) HOLD"
             let color = Color(red: 0.75, green: 1.0, blue: 0.45)
             let text = Text(label)
                 .font(.system(size: 20, weight: .heavy, design: .rounded))

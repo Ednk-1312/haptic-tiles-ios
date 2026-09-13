@@ -23,6 +23,17 @@ class AudioPlayer: ObservableObject {
     private var startDeviceTime: Double = 0  // device clock at that moment
     private var rateValue: Double = 1.0      // practice speed; 1.0 = normal
     private var observers: [NSObjectProtocol] = []
+    /// Seconds of audio between the play() call and sound reaching the
+    /// speaker/headphones (driver + hardware output latency). Judgment
+    /// compensates with it: what the player HEARS at tap time is
+    /// `currentTime − outputLatency`, so lateness must be measured against
+    /// the heard position, not the scheduled position.
+    ///
+    /// Measured off-main after session activation; 0 until then (tests,
+    /// macOS, sessions that deny measurement). Re-measured whenever the
+    /// audio route changes — Bluetooth adds 150–300 ms that must not be
+    /// baked into a stale value.
+    private(set) var outputLatency: Double = 0
     /// True once this process has configured the audio session. Session
     /// activation is deliberately NOT on the play() critical path: the sync
     /// `setActive` on the main thread is an AVAudioSession "Hang Risk"
@@ -133,22 +144,58 @@ class AudioPlayer: ObservableObject {
         player?.stop()
         player = nil
         state = .idle
+        outputLatency = 0
         #if os(iOS)
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers.removeAll()
         #endif
     }
 
+    // MARK: - Output latency measurement
+
+    /// Samples the driver's reported output latency off the main thread and
+    /// publishes it as an EMA (≈3 samples to converge) so a single bad read
+    /// can't jerk calibration mid-session. Called after session activation
+    /// and on every audio-route change (wired ↔ Bluetooth differs hugely).
+    /// The value feeds judgment ONLY; the clock and rendering never touch it.
+    func measureOutputLatency() {
+        #if os(iOS)
+        Task.detached(priority: .utility) { [weak self] in
+            let sample = AVAudioSession.sharedInstance().outputLatency
+            guard sample > 0, sample.isFinite, sample < 0.5 else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                // EMA: first sample initializes, later samples smooth into it.
+                self.outputLatency = self.outputLatency == 0
+                    ? sample
+                    : self.outputLatency * 0.6 + sample * 0.4
+            }
+        }
+        #endif
+    }
+
     // MARK: - Audio session (iOS only — macOS has no AVAudioSession)
 
     #if os(iOS)
-    /// Configures the audio session once per process. Called from `load()`,
-    /// which runs well before `play()` on every realistic path, so playback
-    /// itself never has to wait on (or block) the audio stack.
+    /// Configures the audio session once per process, then samples the
+    /// driver's output latency for THIS player. Called from `load()`, which
+    /// runs well before `play()` on every realistic path, so playback itself
+    /// never has to wait on (or block) the audio stack.
     private func ensureSessionConfigured() {
         let ready = Self.sessionReady.withLock { $0 }
-        guard !ready else { return }
-        Task.detached(priority: .userInitiated) { Self.activateSessionSync() }
+        if ready {
+            // Session already active from a previous load: latency is
+            // readable right now for this new player instance.
+            measureOutputLatency()
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let activated = AudioPlayer.activateSessionSync()
+            guard activated else { return }
+            await MainActor.run { [weak self] in
+                self?.measureOutputLatency()
+            }
+        }
     }
 
     /// Runs the (synchronous) session activation OFF the main thread. The
@@ -156,16 +203,20 @@ class AudioPlayer: ObservableObject {
     /// "Hang Risk" (system-logged fault); the audio stack can block on it.
     /// Nonisolated static + no captures keeps it Sendable-clean. The lock is
     /// only flipped on success so a failed activation is retried next load.
-    nonisolated private static func activateSessionSync() {
-        let already = Self.sessionReady.withLock { $0 }
-        guard !already else { return }
+    /// Returns true when the session is active (freshly or previously).
+    @discardableResult
+    nonisolated private static func activateSessionSync() -> Bool {
+        let already = sessionReady.withLock { $0 }
+        guard !already else { return true }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
             try session.setActive(true)
-            Self.sessionReady.withLock { $0 = true }
+            sessionReady.withLock { $0 = true }
+            return true
         } catch {
             // Playback can still proceed without an active session on most devices.
+            return false
         }
     }
 
@@ -198,7 +249,15 @@ class AudioPlayer: ObservableObject {
         guard let raw = rawReason, let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
         // Headphones unplugged / route vanished: pause rather than keep playing
         // through an unexpected output.
-        if reason == .oldDeviceUnavailable { pause() }
+        if reason == .oldDeviceUnavailable {
+            pause()
+        }
+        // New route (headphones/Bluetooth connected, or the route's config
+        // changed): output latency just changed materially — re-measure so
+        // judgment stays honest.
+        if reason == .newDeviceAvailable || reason == .routeConfigurationChange {
+            measureOutputLatency()
+        }
     }
 
     private func handleMediaServicesReset() {

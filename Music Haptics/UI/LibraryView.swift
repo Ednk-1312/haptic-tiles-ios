@@ -22,6 +22,9 @@ struct LibraryView: View {
     @State private var demoSession: GameSession?
     @State private var isPreparingDemo = false
     #if DEBUG
+    /// Captured at launch so the demo cover can present the session with
+    /// autoplay wired (the `-demoAutoplay` simulator path).
+    private let demoAutoplayRequested = ProcessInfo.processInfo.arguments.contains("-demoAutoplay")
     /// `-demoPassive`: the demo song plays WITHOUT autoplay, so notes fall and
     /// miss — the Simulator visual-testing path for miss feedback.
     @State private var demoPassive = false
@@ -221,7 +224,10 @@ struct LibraryView: View {
         .sheet(isPresented: $showQueue) { QueueView() }
         .fullScreenCover(item: $demoSession) { session in
             if let record = demoRecord {
-                GameView(session: session, song: record, settings: settings)
+                // Launch-arg automation presents with autoplay ON — without
+                // this the demo run just misses every note headlessly.
+                GameView(session: session, song: record, settings: settings,
+                         autoplay: demoAutoplayRequested)
             }
         }
         #if DEBUG

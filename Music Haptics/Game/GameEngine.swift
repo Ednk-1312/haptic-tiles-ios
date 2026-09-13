@@ -62,7 +62,16 @@ final class GameEngine: ObservableObject {
 
     // UI-observable state
     @Published private(set) var state: GameplayState = .ready
-    @Published private(set) var currentTime: Double = 0
+    /// Audio-clock position. Deliberately NOT @Published: publishing it at
+    /// tick cadence invalidated the entire view tree 60×/s (the HUD and
+    /// background diffed every frame even when nothing visible changed) —
+    /// a primary stutter source. The renderer reads the extrapolated clock
+    /// via TimelineView; the HUD reads the coarse `displayProgress`.
+    private(set) var currentTime: Double = 0
+    /// Coarse song-position fraction (0…1) for the HUD progress bar.
+    /// Updated only when it moves ≥0.25% (~4 updates per 5-minute song) so
+    /// HUD updates never drive view-tree invalidation at frame cadence.
+    @Published private(set) var displayProgress: Double = 0
     @Published private(set) var scoreValue = 0
     @Published private(set) var comboCount = 0
     @Published private(set) var maxCombo = 0
@@ -115,6 +124,29 @@ final class GameEngine: ObservableObject {
 
     /// Live audio-clock position; the view reads this every frame.
     var audioTime: Double { player.currentTime }
+    /// Rendering and judgment projection anchor: the audio time the player
+    /// is actually HEARING right now. `player.currentTime` is the scheduled
+    /// decoder position; sound physically leaves the speaker
+    /// `outputLatency` later. Tiles must land on what the ear hears, so
+    /// visual projection (and nothing else) leads by that amount.
+    var renderTime: Double { player.currentTime - player.outputLatency }
+    /// Playback rate (practice speed) — the render clock extrapolates at
+    /// this multiplier between logic ticks.
+    var clockRate: Double { player.rate }
+
+    // MARK: - Render clock anchor
+
+    /// Anchor mapping wall-clock → audio-clock for the renderer, refreshed
+    /// by every logic tick (~16 ms). Between ticks the view extrapolates:
+    /// `t = anchorAudio + (now − anchorDate) × rate`. Timer fire jitter (±4
+    /// ms on a heavily loaded main thread) therefore smooths out instead of
+    /// appearing as tile judder — tiles advance continuously with the
+    /// display refresh while the game RULES stay on the deterministic
+    /// engine tick. Seek/practice-jump/pause all re-anchor on their next
+    /// tick; the view additionally freezes to the anchor when not playing.
+    private(set) var renderAnchorDate: Double = 0
+    /// Audio (heard) time captured at `renderAnchorDate`.
+    private(set) var renderAnchorAudio: Double = 0
     var duration: Double { player.duration > 0 ? player.duration : chart.duration }
     /// Note travel time: the user's note-speed base, scaled by the song's BPM
     /// (faster music falls quicker) and clamped to stay readable.
@@ -232,6 +264,12 @@ final class GameEngine: ObservableObject {
     /// session's timer is valid, 0 after cleanup/finish. Exposed for the
     /// loop-audit tests and the diagnostics overlay.
     var debugActiveTimerCount: Int { (timer?.isValid ?? false) ? 1 : 0 }
+
+    /// Testing hook: runs exactly one logic tick on demand (the live timer
+    /// is unpredictable in tests). Same guard as the real loop.
+    func tickForTesting() {
+        tick()
+    }
     /// Bumped on every start/cleanup; a tick only runs for the current value.
     var debugLoopGeneration: Int { loopGeneration }
 
@@ -284,13 +322,17 @@ final class GameEngine: ObservableObject {
     }
 
     private func recordDebugHit(judgment: Judgment, noteTime: Double, tapTime: Double) {
-        let deltaMs = (tapTime + settings.calibrationOffsetMs / 1000 - noteTime) * 1000
+        // The SAME latency compensation the judgment used — the telemetry
+        // must reflect what the grader saw, or the overlay lies.
+        let adjusted = isAutoplay ? tapTime : tapTime - player.outputLatency + settings.calibrationOffsetMs / 1000
+        let deltaMs = (adjusted - noteTime) * 1000
         hitDeltaStats.add(abs(deltaMs))
-        let hit = DebugHit(judgment: judgment, noteTime: noteTime, tapTime: tapTime, deltaMs: deltaMs)
+        let hit = DebugHit(judgment: judgment, noteTime: noteTime, tapTime: adjusted, deltaMs: deltaMs)
         debugHits.append(hit)
         if debugHits.count > 40 { debugHits.removeFirst(debugHits.count - 40) }
-        print(String(format: "[Timing] %@ note=%.3fs tap=%.3fs Δ%+.1fms calib=%+.1fms",
-                     judgment.displayName, noteTime, tapTime, deltaMs, settings.calibrationOffsetMs))
+        print(String(format: "[Timing] %@ note=%.3fs tap=%.3fs Δ%+.1fms (out-lat %.0fms calib %+.0fms)",
+                     judgment.displayName, noteTime, adjusted, deltaMs,
+                     player.outputLatency * 1000, settings.calibrationOffsetMs))
     }
 
     private func recordDebugTick(audioTime t: Double) {
@@ -427,6 +469,14 @@ final class GameEngine: ObservableObject {
 
         player.play(from: 0)
         state = .playing
+        // Output latency is measurable once the session/route is live; the
+        // session activation from load() may still be in flight, so sample
+        // now and again shortly after — the EMA converges within ~3 reads.
+        player.measureOutputLatency()
+        Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            await MainActor.run { [weak self] in self?.player.measureOutputLatency() }
+        }
         #if DEBUG
         resetDebugTelemetry()
         logAnchor("start", audioTime: player.currentTime)
@@ -648,7 +698,7 @@ final class GameEngine: ObservableObject {
         debugLastTouch = DebugTouch(lane: lane, x: point.x, y: point.y, audioTime: audioTime,
                                     noteID: hit?.note.id,
                                     judged: hit.map { scheduler?.judgment(for: $0.index) } ?? nil,
-                                    deltaMs: hit.map { ($0.note.time - audioTime - settings.calibrationOffsetMs / 1000) * 1000 })
+                                    deltaMs: hit.map { (audioTime - player.outputLatency - $0.note.time) * 1000 })
         #endif
         if let hit { registerHoldIfNeeded(hit, at: audioTime) }
     }
@@ -680,11 +730,15 @@ final class GameEngine: ObservableObject {
     /// grace of) its tail it completes with the full bonus; an earlier release
     /// banks the fraction of the hold genuinely sustained — partial bonus,
     /// no combo break — instead of the old double penalty.
+    /// The release moment uses the same heard-time compensation as taps:
+    /// the player releases in response to what they see/hear, which reads
+    /// `outputLatency` late on the raw audio clock.
     func handleTouchUp(lane: Int) {
         touchesDown.remove(lane)
-        guard state == .playing,
-              let result = holds.release(lane: lane, at: player.currentTime + settings.calibrationOffsetMs / 1000)
-        else { return }
+        guard state == .playing else { return }
+        let releaseTime = isAutoplay ? player.currentTime
+            : player.currentTime - player.outputLatency + settings.calibrationOffsetMs / 1000
+        guard let result = holds.release(lane: lane, at: releaseTime) else { return }
         if result.completed {
             completeHold(hold: result.hold, at: player.currentTime)
         } else {
@@ -720,6 +774,15 @@ final class GameEngine: ObservableObject {
     /// autoplay. Returns the hit note when one was judged. Real input passes
     /// the live audio time; autoplay passes the note's exact timestamp.
     ///
+    /// Latency model: the player reacts to sound arriving at
+    /// `audioTime − outputLatency` (and their finger→touch event adds a few
+    /// ms more). Measuring against the raw `audioTime` bakes that latency in
+    /// as systematic lateness that no amount of skill removes — a real
+    /// 0 ms tap grades late, and the bias rides the run. Judgment therefore
+    /// evaluates taps against the HEARD time (audio minus output latency).
+    /// The user's manual calibration still applies on top for whatever
+    /// remains (render pipeline delay, player's individual reaction style).
+    ///
     /// Spatial matching: with a real touch point, the tap first tries to match
     /// the note whose visible tile lies under the finger (within
     /// `PlayfieldGeometry.spatialCatchDistance`), judged by timing with a
@@ -728,6 +791,9 @@ final class GameEngine: ObservableObject {
     /// the pure time-first path.
     private func judgeTap(lane: Int, at time: Double, point: CGPoint) -> (note: ChartNote, index: Int)? {
         guard let scheduler, let judge else { return nil }
+        // Autoplay taps at exact chart times (latency 0, calibration must
+        // not perturb validation) — keep the pure path bit-identical.
+        let heardTime = isAutoplay ? time : time - player.outputLatency + settings.calibrationOffsetMs / 1000
         let window = judge.config.goodWindow + InputJudge.Config.edgeGrace
 
         // Spatial path: a real finger position tries tile matching first.
@@ -747,12 +813,12 @@ final class GameEngine: ObservableObject {
                     // Judgment floor: a tap physically ON a visible tile is
                     // at worst a GOOD — the player aimed correctly; only the
                     // grade reflects timing.
-                    let raw = judge.classifyForgiving(tapTime: time, noteTime: candidate.note.time)
+                    let raw = judge.classifyForgiving(tapTime: heardTime, noteTime: candidate.note.time)
                     let judgment: Judgment = raw == .miss ? .good : raw
                     #if DEBUG
                     print(String(format: "[Input] lane=%d touchY=%.2f note=%.3fs audio=%.3fs Δ%+.0fms d=%.2f → %@ (spatial)",
                                  lane, point.y, candidate.note.time, time,
-                                 (time + settings.calibrationOffsetMs / 1000 - candidate.note.time) * 1000,
+                                 (heardTime - candidate.note.time) * 1000,
                                  distance, judgment.displayName.uppercased()))
                     recordDebugHit(judgment: judgment, noteTime: candidate.note.time,
                                    tapTime: time)
@@ -765,8 +831,9 @@ final class GameEngine: ObservableObject {
             }
         }
 
-        // Timing path: notes within the classic window of the hit line.
-        guard let hit = scheduler.nearest(in: lane, to: time, window: window) else {
+        // Timing path: notes within the classic window of the hit line,
+        // measured against the heard time.
+        guard let hit = scheduler.nearest(in: lane, to: heardTime, window: window) else {
             // Tap registered but nothing eligible: log it so a perceived
             // "swallowed" tap is visible in the diagnostics.
             #if DEBUG
@@ -775,12 +842,11 @@ final class GameEngine: ObservableObject {
             #endif
             return nil
         }
-        let judgment = judge.classifyForgiving(tapTime: time, noteTime: hit.note.time)
+        let judgment = judge.classifyForgiving(tapTime: heardTime, noteTime: hit.note.time)
         #if DEBUG
-        let deltaMs = (time + settings.calibrationOffsetMs / 1000 - hit.note.time) * 1000
-        print(String(format: "[Input] lane=%d touchX=%.2f touchY=%.2f note.lane=%d note=%.3fs audio=%.3fs Δ%+.1fms calib=%+.1fms → %@",
+        print(String(format: "[Input] lane=%d touchX=%.2f touchY=%.2f note.lane=%d note=%.3fs audio=%.3fs Δ%+.1fms (heard %.3fs) → %@",
                      lane, point.x, point.y, hit.note.lane, hit.note.time, time,
-                     deltaMs, settings.calibrationOffsetMs, judgment.displayName.uppercased()))
+                     (heardTime - hit.note.time) * 1000, heardTime, judgment.displayName.uppercased()))
         recordDebugHit(judgment: judgment, noteTime: hit.note.time, tapTime: time)
         #endif
         recordPracticeHit(judgment: judgment, noteTime: hit.note.time, tapTime: time)
@@ -870,6 +936,17 @@ final class GameEngine: ObservableObject {
         guard state == .playing, let scheduler, let judge else { return }
         let t = player.currentTime
         currentTime = t
+        // Refresh the render anchor (wall → audio mapping for the view).
+        renderAnchorDate = Date().timeIntervalSinceReferenceDate
+        renderAnchorAudio = t - player.outputLatency
+        // Coarse HUD progress: publish only on a real move (≥0.25%).
+        let total = duration
+        if total > 0 {
+            let progress = min(1, max(0, t / total))
+            if abs(progress - displayProgress) >= 0.0025 || progress < displayProgress {
+                displayProgress = progress
+            }
+        }
         updateBeatPulse(t)
         #if DEBUG
         recordDebugTick(audioTime: t)
@@ -895,7 +972,9 @@ final class GameEngine: ObservableObject {
             #if DEBUG
             recordDebugHit(judgment: .miss, noteTime: note.time, tapTime: t)
             #endif
-            recordPracticeHit(judgment: .miss, noteTime: note.time, tapTime: t)
+            // isTapDriven: false — a timeout miss is not a tap attempt and
+            // must not feed the live timing-bias readout.
+            recordPracticeHit(judgment: .miss, noteTime: note.time, tapTime: t, isTapDriven: false)
             if note.type == .hold {
                 holds.markMissed(noteID: note.id)   // head never touched → missed
             }
@@ -914,10 +993,19 @@ final class GameEngine: ObservableObject {
 
         hapticScheduler?.update(currentTime: t)
 
+        // Effect arrays: prune ONLY when something actually expires. An
+        // unconditional removeAll still publishes (empty → empty) and
+        // invalidated the view tree every tick even on quiet frames.
         let cutoff = t - 0.8
-        feedback.removeAll { $0.time < cutoff }
-        laneFlashes.removeAll { $0.time < cutoff }
-        holdPopups.removeAll { $0.time < cutoff }
+        if feedback.contains(where: { $0.time < cutoff }) {
+            feedback.removeAll { $0.time < cutoff }
+        }
+        if laneFlashes.contains(where: { $0.time < cutoff }) {
+            laneFlashes.removeAll { $0.time < cutoff }
+        }
+        if holdPopups.contains(where: { $0.time < cutoff }) {
+            holdPopups.removeAll { $0.time < cutoff }
+        }
 
         if t >= endTime {
             finish()
@@ -976,13 +1064,14 @@ final class GameEngine: ObservableObject {
         return sections.last?.index ?? -1
     }
 
-    /// Appends one compact replay event using the same calibrated delta the
-    /// debug telemetry reports. Events are ordered by the audio clock; the
+    /// Appends one compact replay event using the same latency-compensated
+    /// delta the judge used. Events are ordered by the audio clock; the
     /// ReplayBuilder normalizes order deterministically at save time.
     private func recordReplayEvent(kind: ReplayEventKind, noteID: Int, lane: Int,
                                    time: Double, judgment: Judgment?,
                                    noteTime: Double) {
-        let deltaMs = (time + settings.calibrationOffsetMs / 1000 - noteTime) * 1000
+        let adjusted = isAutoplay ? time : time - player.outputLatency + settings.calibrationOffsetMs / 1000
+        let deltaMs = (adjusted - noteTime) * 1000
         replayEvents.append(ReplayEvent(kind: kind,
                                         noteID: noteID,
                                         lane: lane,
@@ -993,12 +1082,34 @@ final class GameEngine: ObservableObject {
                                         combo: comboCount))
     }
 
-    /// Practice feedback accumulator (accuracy + mean |timing error|). Uses
-    /// the same calibrated delta the debug telemetry reports.
-    private func recordPracticeHit(judgment: Judgment, noteTime: Double, tapTime: Double) {
+    /// Timing telemetry for every judged note: practice stats accumulate in
+    /// practice; the rolling signed bias feeds the live HUD in all builds.
+    /// `isTapDriven` is false for timeout miss declarations — a note nobody
+    /// touched must not teach the player they "tap late".
+    private func recordPracticeHit(judgment: Judgment, noteTime: Double, tapTime: Double,
+                                   isTapDriven: Bool = true) {
+        let adjusted = isAutoplay ? tapTime : tapTime - player.outputLatency + settings.calibrationOffsetMs / 1000
+        let deltaMs = (adjusted - noteTime) * 1000
+        // Live bias telemetry: a rolling signed mean over the player's real
+        // tap attempts tells them (and diagnostics) which way they lean.
+        if isTapDriven {
+            recentTapDeltasMs.append(deltaMs)
+            recentTapBiasCount += 1
+            if recentTapDeltasMs.count > 16 { recentTapDeltasMs.removeFirst(recentTapDeltasMs.count - 16) }
+        }
         guard isPractice else { return }
-        let deltaMs = (tapTime + settings.calibrationOffsetMs / 1000 - noteTime) * 1000
         practiceStats.record(judgment: judgment, deltaMs: deltaMs)
+    }
+
+    /// Rolling signed tap deltas (ms) for live timing feedback.
+    private var recentTapDeltasMs: [Double] = []
+    /// Number of taps measured for the live bias (gates the HUD display).
+    private(set) var recentTapBiasCount = 0
+    /// Signed mean of recent tap deltas (ms; + = tending late). The honest
+    /// number a calibration suggestion is derived from.
+    var recentTapBiasMs: Double {
+        guard !recentTapDeltasMs.isEmpty else { return 0 }
+        return recentTapDeltasMs.reduce(0, +) / Double(recentTapDeltasMs.count)
     }
 
     private func apply(_ judgment: Judgment, index: Int, lane: Int, time: Double, strength: Double) {

@@ -80,21 +80,26 @@ struct GameSessionView: View {
         return "Score \(score)"
     }
 
-    /// Builds the artwork-derived background theme OFF the main actor.
-    /// Building it synchronously on the UI thread (full-image decode +
-    /// CIGaussianBlur + palette analysis) froze gameplay for hundreds of ms
-    /// every time a new song's artwork was first shown — the timer-driven
-    /// note stream and SwiftUI couldn't run while it worked. The cheap
-    /// deterministic fallback theme (set in the property initializer) covers
-    /// the first frame; the artwork theme swaps in the moment it's ready.
+    /// Builds the song's background theme OFF the main actor, with the
+    /// genre/mood resolved FIRST (local metadata, else a timeout-bounded
+    /// cached lookup — both strictly pre-gameplay). The cheap deterministic
+    /// fallback covers the first frame; the real theme swaps in when ready.
     /// Runs as a `.task(id:)` so leaving the session (song switch, exit)
     /// cancels the build — a stale artwork can never land on another song.
     private func loadBackgroundTheme() async {
         let artworkData = song.artworkData
         let seed = Self.stableSeed(song.id)
         let sessionID = session.id
+        // Genre resolution happens before theme assembly and before gameplay
+        // is perceptually underway; it is disk-cached, so the network only
+        // pays once per song, and a timeout degrades to neutral/last cache.
+        let mood = await GenreLookupService.shared.resolveMood(
+            title: song.title,
+            artist: song.artist,
+            localGenre: song.genre)
+        guard !Task.isCancelled, sessionID == session.id else { return }
         let built = await Task.detached(priority: .userInitiated) {
-            SongBackgroundThemeFactory.make(artworkData: artworkData, seed: seed)
+            SongBackgroundThemeFactory.make(artworkData: artworkData, seed: seed, mood: mood)
         }.value
         guard !Task.isCancelled, sessionID == session.id else { return }
         theme = built
@@ -469,6 +474,7 @@ struct GameSessionView: View {
                         .frame(minWidth: 112)
                         .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
                     comboLine
+                    timingBiasLine
                 }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -480,6 +486,28 @@ struct GameSessionView: View {
         }
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
+    }
+
+    /// Live timing bias under the score: rolling signed mean of recent tap
+    /// deltas, quantized to 5 ms so the label doesn't flicker per tap, and
+    /// published only when the QUANTIZED value changes (an every-tick text
+    /// update would re-diff the HUD each frame). Shows nothing until there
+    /// are ≥4 measured taps. Real feedback — the honest answer to "why is my
+    /// accuracy low?": a persistent +45 ms tells the player they (or their
+    /// route's latency) genuinely run late, and calibration fixes it.
+    private var timingBiasLine: some View {
+        Group {
+            if !engine.isPractice, engine.recentTapBiasCount >= 4 {
+                let quantized = (engine.recentTapBiasMs / 5).rounded() * 5
+                if abs(quantized) >= 10 {
+                    let late = quantized > 0
+                    Text("\(late ? "LATE" : "EARLY") \(Int(abs(quantized)))ms")
+                        .font(.system(size: 9, weight: .heavy).monospaced())
+                        .foregroundStyle(late ? Color(red: 1.0, green: 0.62, blue: 0.30) : Color(red: 0.45, green: 0.85, blue: 1.0))
+                        .accessibilityLabel("Timing bias: \(late ? "late" : "early") by \(Int(abs(quantized))) milliseconds")
+                }
+            }
+        }
     }
 
     /// Combo line under the score (yellow/orange gradient, pops on change).
@@ -524,8 +552,10 @@ struct GameSessionView: View {
     /// as the run passes them.
     private var topProgress: some View {
         GeometryReader { geo in
-            let duration = engine.duration
-            let fraction = duration > 0 ? min(1, max(0, engine.currentTime / duration)) : 0
+            // Coarse published progress (updates ~4×/song), not the raw
+            // 60 Hz clock — reading engine.currentTime here would make the
+            // HUD an every-frame view-tree invalidation source.
+            let fraction = engine.displayProgress
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.18))
                 Capsule()

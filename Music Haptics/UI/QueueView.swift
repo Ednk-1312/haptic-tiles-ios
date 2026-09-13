@@ -159,7 +159,7 @@ struct QueueView: View {
                         .frame(width: 32, height: 32)
                         .background(Color.accentColor.opacity(0.16), in: Circle())
                 }
-                .accessibilityLabel("Play \\(entry.title)")
+                .accessibilityLabel("Play \(entry.title)")
             }
         }
         .padding(.vertical, 2)

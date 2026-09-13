@@ -235,6 +235,13 @@ final class SpatialTapEngineTests: XCTestCase {
 @MainActor
 final class MutableClockPlayer: AudioPlayer {
     var now: Double = 0
+    /// Simulated driver output latency (the real player measures this from
+    /// AVAudioSession; the fake just stores what a test assigns).
+    override var outputLatency: Double {
+        get { simulatedLatency }
+        set { simulatedLatency = newValue }
+    }
+    private var simulatedLatency: Double = 0
 
     override var currentTime: Double { now }
     override var duration: Double { 30 }
