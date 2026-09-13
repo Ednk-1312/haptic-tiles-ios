@@ -21,10 +21,12 @@ struct LibraryView: View {
     @State private var demoRecord: SongRecord?
     @State private var demoSession: GameSession?
     @State private var isPreparingDemo = false
-    #if DEBUG
     /// Captured at launch so the demo cover can present the session with
-    /// autoplay wired (the `-demoAutoplay` simulator path).
+    /// autoplay wired (the `-demoAutoplay` simulator path). Read from the
+    /// unguarded demo cover, so it exists in all configurations (inert in
+    /// Release: no launch argument is ever passed there).
     private let demoAutoplayRequested = ProcessInfo.processInfo.arguments.contains("-demoAutoplay")
+    #if DEBUG
     /// `-demoPassive`: the demo song plays WITHOUT autoplay, so notes fall and
     /// miss — the Simulator visual-testing path for miss feedback.
     @State private var demoPassive = false
