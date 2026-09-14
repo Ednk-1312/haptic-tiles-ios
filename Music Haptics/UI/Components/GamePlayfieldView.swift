@@ -121,9 +121,6 @@ struct GamePlayfieldView: View {
     // MARK: - Layout metrics
 
     private var approachTime: Double { engine.approachTime }
-    /// Per-moment lead: the dynamic speed curve shared with the engine's
-    /// spatial touch catch — what you see is what you hit.
-    private func leadAt(_ time: Double) -> Double { engine.dynamicLead(at: time) }
     /// Shared with the engine's spatial-catch math — the touch layer and the
     /// renderer can never drift apart.
     private var hitLineY: CGFloat { PlayfieldGeometry.hitLineY }
@@ -188,18 +185,21 @@ struct GamePlayfieldView: View {
         let hitY = size.height * hitLineY
         let top = size.height * topY
         let travel = max(1, hitY - top)
-        let lead = leadAt(time)
-        guard lead > 0 else { return }
 
         for item in engine.visibleNotes(at: time) {
             let note = item.note
-            let progress = (note.time - time) / lead
+            // The absolute-time profile is the only movement equation used by
+            // the renderer. It integrates a positive speed curve, so changing
+            // section speed cannot reposition an existing tile backward.
+            let progress = engine.visualProgress(noteTime: note.time, at: time)
             let closeness = min(1, max(0, 1 - progress))
             let x = CGFloat(note.lane) * width + (width - noteWidth) / 2
 
             if note.type == .hold {
+                let tailProgress = engine.visualProgress(noteTime: note.time + note.duration, at: time)
                 drawHold(context, note: note, judged: item.judged, time: time,
-                         x: x, width: noteWidth, hitY: hitY, travel: travel, lead: lead)
+                         x: x, width: noteWidth, hitY: hitY, travel: travel,
+                         headProgress: progress, tailProgress: tailProgress)
                 continue
             }
             // Fast reject: unjudged taps only render near their window. A
@@ -236,12 +236,10 @@ struct GamePlayfieldView: View {
         let hitY = size.height * hitLineY
         let top = size.height * topY
         let travel = max(1, hitY - top)
-        let lead = leadAt(time)
-        guard lead > 0 else { return }
         for item in engine.visibleNotes(at: time) {
             guard item.judged == .miss, item.note.type != .hold else { continue }
             let note = item.note
-            let progress = (note.time - time) / lead
+            let progress = engine.visualProgress(noteTime: note.time, at: time)
             let x = CGFloat(note.lane) * width + (width - noteWidth) / 2
             let bottomY = hitY - CGFloat(progress) * travel
             let rect = CGRect(x: x, y: bottomY - noteHeight, width: noteWidth, height: noteHeight)
@@ -376,9 +374,8 @@ struct GamePlayfieldView: View {
     /// radius, so it visibly poked below the tile onto the lane.
     private func drawHold(_ context: GraphicsContext, note: ChartNote, judged: Judgment?,
                           time: Double, x: CGFloat, width: CGFloat,
-                          hitY: CGFloat, travel: CGFloat, lead: Double) {
-        let headProgress = (note.time - time) / lead
-        let tailProgress = (note.time + note.duration - time) / lead
+                          hitY: CGFloat, travel: CGFloat,
+                          headProgress: Double, tailProgress: Double) {
         // Not on screen yet (or long past, fully gone).
         guard headProgress < 1.02, tailProgress > -0.3 else { return }
 
@@ -404,7 +401,7 @@ struct GamePlayfieldView: View {
 
         if engine.holdActive(lane: note.lane) {
             drawActiveHold(context, note: note, rect: rect, corner: corner,
-                           hitY: hitY, time: time)
+                           hitY: hitY, travel: travel, time: time)
             return
         }
 
@@ -457,10 +454,27 @@ struct GamePlayfieldView: View {
     /// tile body, so nothing bleeds onto the lane below.
     private func drawActiveHold(_ context: GraphicsContext, note: ChartNote,
                                 rect: CGRect, corner: CGFloat,
-                                hitY: CGFloat, time: Double) {
-        _ = hitY
-        let fraction = CGFloat(min(1, max(0, engine.holdProgress(lane: note.lane) ?? 0)))
-        let fillHeight = rect.height * fraction
+                                hitY: CGFloat, travel: CGFloat, time: Double) {
+        // The fill is projected from timestamps, not from a frame counter or
+        // a constant pixels-per-second animation. This keeps it locked to the
+        // same integrated DynamicSpeedProfile as the hold head and tail.
+        let holdStart = engine.holdStartTime(lane: note.lane) ?? note.time
+        let holdEnd = note.time + note.duration
+        let fraction = min(1, max(0, engine.holdProgress(lane: note.lane, at: time) ?? 0))
+        let consumedTime = min(holdEnd, max(holdStart,
+                                             holdStart + (holdEnd - holdStart) * fraction))
+        // If a player pressed early on the incoming body, the visual fill
+        // starts at the actual press position. In the normal head-press case
+        // that is the chart head. Both endpoints use the same absolute-time
+        // projection as the body, so a speed change cannot make the fill lag.
+        let fillStartTime = holdStart
+        let startProgress = engine.visualProgress(noteTime: fillStartTime, at: time)
+        let endProgress = engine.visualProgress(noteTime: consumedTime, at: time)
+        let startY = hitY - CGFloat(startProgress) * travel
+        let endY = hitY - CGFloat(endProgress) * travel
+        let fillMinY = max(rect.minY, min(rect.maxY, min(startY, endY)))
+        let fillMaxY = min(rect.maxY, max(rect.minY, max(startY, endY)))
+        let fillHeight = max(0, fillMaxY - fillMinY)
         // Unconsumed remainder above the fill keeps the black piano look.
         let bodyGradient = Gradient(colors: [
             Color(red: 0.095, green: 0.095, blue: 0.12),
@@ -475,7 +489,7 @@ struct GamePlayfieldView: View {
         let pulse = 0.8 + 0.2 * sin(time * 14)
         if fillHeight >= 2 {
             let fillRect = CGRect(x: rect.minX,
-                                  y: rect.maxY - fillHeight,
+                                  y: fillMinY,
                                   width: rect.width,
                                   height: fillHeight)
             // Clip to the rounded body so corners never leak.
@@ -568,11 +582,9 @@ struct GamePlayfieldView: View {
         let hitY = size.height * hitLineY
         let top = size.height * topY
         let travel = max(1, hitY - top)
-        let lead = leadAt(time)
-        guard lead > 0 else { return }
 
         func projectY(_ t: Double) -> CGFloat {
-            hitY - CGFloat((t - time) / lead) * travel
+            hitY - CGFloat(engine.visualProgress(noteTime: t, at: time)) * travel
         }
 
         #if DEBUG

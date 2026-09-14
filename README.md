@@ -25,7 +25,7 @@ to the audio clock so you can *feel* the rhythm.
 
 ## Quick start
 
-1. Open `Music Haptics.xcodeproj` in **Xcode 16.2 or later** (deployment target **iOS 18.0**; validated with the iOS 18.2 SDK).
+1. Open `Music Haptics.xcodeproj` in **Xcode 26 or later** (deployment target **iOS 26.0**; validated with the iOS 26 SDK).
 2. Run on a **physical iPhone** — Core Haptics and the Files picker need a
    device; the simulator can build and run the UI but cannot vibrate.
 3. On first use, **My Music** asks for Music-library access, then browse/search

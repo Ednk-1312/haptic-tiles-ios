@@ -30,6 +30,48 @@ enum DifficultyLevel: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Stable visual-speed multiplier for gameplay. Chart density and timing
+    /// remain the primary difficulty differences; this adds a measurable,
+    /// bounded movement distinction without changing the scoring timeline.
+    var visualSpeedMultiplier: Double {
+        switch self {
+        case .easy: return 0.88
+        case .casual: return 0.94
+        case .medium: return 1.00
+        case .hard: return 1.08
+        case .expert: return 1.16
+        case .extreme: return 1.25
+        }
+    }
+
+    /// Scales how strongly this difficulty responds to the prepared intensity
+    /// curve. It changes visual pacing only; note timestamps, hit windows and
+    /// scoring remain identical at every level.
+    var dynamicSpeedResponse: Double {
+        switch self {
+        case .easy: return 0.72
+        case .casual: return 0.84
+        case .medium: return 1.00
+        case .hard: return 1.10
+        case .expert: return 1.20
+        case .extreme: return 1.28
+        }
+    }
+
+    /// Minimum-to-maximum visual-speed range remains intentionally bounded.
+    /// Keeping this value explicit makes the difficulty/profile contract easy
+    /// to test and prevents a future tuning change from creating runaway speed.
+    var dynamicSpeedRange: ClosedRange<Double> {
+        switch self {
+        case .easy: return 0.80...1.08
+        case .casual: return 0.82...1.12
+        case .medium: return 0.78...1.22
+        case .hard: return 0.78...1.30
+        case .expert: return 0.76...1.40
+        case .extreme: return 0.74...1.48
+        }
+    }
+
     /// Minimum gap between two notes (seconds). Prevents unplayable clusters.
     var minSpacing: Double {
         switch self {

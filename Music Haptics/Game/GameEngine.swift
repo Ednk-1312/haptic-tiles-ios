@@ -15,6 +15,14 @@ final class GameEngine: ObservableObject {
     private let analysis: AudioAnalysis?
     private let settings: SettingsStore
     private let practice: PracticeConfig?
+    /// Optional validated pre-game advice from Foundation Models. It is
+    /// consumed only while constructing the deterministic profile; the model
+    /// is never consulted by the real-time loop.
+    private let enhancedSpeedPoints: [DynamicSpeedProfile.SpeedCurvePoint]?
+    /// Prepared once before the session starts. It is the single source of
+    /// truth for visual movement and spatial touch projection.
+    private var speedProfile: DynamicSpeedProfile
+    private var reduceMotionForSpeed = false
 
     // Subsystems
     private let player: AudioPlayer
@@ -37,6 +45,18 @@ final class GameEngine: ObservableObject {
     /// sensory effects. Safe to call before or during a run.
     func setReducedHaptics(_ reduced: Bool) {
         effectiveReducedHaptics = reduced
+    }
+
+    /// Reduce Motion keeps the deterministic audio/chart timeline unchanged,
+    /// but removes expressive visual speed variation before the run begins.
+    func setReduceMotion(_ reduced: Bool) {
+        guard reduceMotionForSpeed != reduced else { return }
+        reduceMotionForSpeed = reduced
+        speedProfile = DynamicSpeedProfile.make(analysis: analysis, chart: chart,
+                                                 enabled: settings.dynamicSpeedEnabled,
+                                                 intensity: settings.dynamicSpeedIntensity,
+                                                 reduceMotion: reduced,
+                                                 enhancedPoints: enhancedSpeedPoints)
     }
 
     /// Called (main actor) when a VoiceOver-worthy gameplay event happens:
@@ -124,12 +144,18 @@ final class GameEngine: ObservableObject {
 
     /// Live audio-clock position; the view reads this every frame.
     var audioTime: Double { player.currentTime }
-    /// Rendering and judgment projection anchor: the audio time the player
-    /// is actually HEARING right now. `player.currentTime` is the scheduled
-    /// decoder position; sound physically leaves the speaker
-    /// `outputLatency` later. Tiles must land on what the ear hears, so
-    /// visual projection (and nothing else) leads by that amount.
-    var renderTime: Double { player.currentTime - player.outputLatency }
+    /// Rendering uses the run's stable latency sample and the monotonic render
+    /// anchor. Between logic ticks this is extrapolated at the playback rate,
+    /// so the same clock drives the Canvas and hold presentation without
+    /// waiting for the next engine tick.
+    var renderTime: Double {
+        guard renderAnchorDate > 0 else {
+            return player.currentTime - (renderLatencyForRun ?? max(0, player.outputLatency))
+        }
+        guard state == .playing else { return renderAnchorAudio }
+        let elapsed = max(0, Date().timeIntervalSinceReferenceDate - renderAnchorDate)
+        return renderAnchorAudio + elapsed * clockRate
+    }
     /// Playback rate (practice speed) — the render clock extrapolates at
     /// this multiplier between logic ticks.
     var clockRate: Double { player.rate }
@@ -147,6 +173,14 @@ final class GameEngine: ObservableObject {
     private(set) var renderAnchorDate: Double = 0
     /// Audio (heard) time captured at `renderAnchorDate`.
     private(set) var renderAnchorAudio: Double = 0
+    /// A run keeps one render-latency sample. AVAudioSession can update its
+    /// reported latency after playback starts (or when a route changes); using
+    /// that changing value directly would re-anchor the visual clock and make
+    /// every visible tile jump. The next run samples the new route instead.
+    private var renderLatencyForRun: Double?
+    /// Long holds must remain queryable after their heads have passed the
+    /// normal render window, otherwise the body disappears before its tail.
+    private let longestHoldDuration: Double
     var duration: Double { player.duration > 0 ? player.duration : chart.duration }
     /// Note travel time: the user's note-speed base, scaled by the song's BPM
     /// (faster music falls quicker) and clamped to stay readable.
@@ -154,52 +188,24 @@ final class GameEngine: ObservableObject {
         NoteMovement.leadTime(bpm: analysis?.tempoBPM, base: settings.noteApproachTime)
     }
 
-    /// Lead time in effect at audio time `t`: the song's global lead modulated
-    /// by the LOCAL tempo around `t` (smoothed, ±12%). This is the single
-    /// source of truth for tile speed — the renderer's projection, the spawn
-    /// window and the spatial touch catch all read it, so tiles, hit detection
-    /// and what the player sees always agree. Subtle by design: the user's
-    /// Note Speed setting dominates; the music adds the breathing.
+    /// Lead time at the current absolute song position. This compatibility
+    /// API now samples the prepared positive speed curve; it does not rebuild
+    /// or mutate movement state per frame.
     func dynamicLead(at time: Double) -> Double {
-        // The renderer evaluates this once per frame per tile. The median
-        // window scan is cheap but not free — cache by frame step so a single
-        // frame reuses one computation instead of recomputing per note.
-        if let cached = leadCache, abs(time - leadCacheTime) < 0.02 { return cached }
-        let lead = computeDynamicLead(at: time)
-        leadCache = lead
-        leadCacheTime = time
-        return lead
+        speedProfile.leadTime(at: time, baseLead: approachTime)
     }
 
-    private var leadCache: Double?
-    private var leadCacheTime: Double = -1
-
-    private func computeDynamicLead(at time: Double) -> Double {
-        guard let beats = analysis?.beats, !beats.isEmpty else { return approachTime }
-        let globalBeatInterval: Double
-        if let bpm = analysis?.tempoBPM, bpm > 20, bpm < 300 {
-            globalBeatInterval = 60 / bpm
-        } else if beats.count >= 2 {
-            globalBeatInterval = medianBeatInterval(in: beats)
-        } else {
-            return approachTime
-        }
-        return NoteMovement.dynamicLeadTime(at: time, beats: beats,
-                                            globalBeatInterval: globalBeatInterval,
-                                            baseLead: approachTime)
+    /// Monotonic absolute-time projection shared by the renderer and touch
+    /// matcher. 1 = spawn, 0 = hit line, negative = passed the line.
+    func visualProgress(noteTime: Double, at time: Double) -> Double {
+        speedProfile.progress(noteTime: noteTime, currentTime: time, baseLead: approachTime)
     }
 
-    /// Median of consecutive beat intervals — robust to one dropped/extra beat.
-    private func medianBeatInterval(in beats: [Beat]) -> Double {
-        guard beats.count >= 2 else { return 0.5 }
-        var intervals = zip(beats.dropFirst(), beats).map { $0.0.time - $0.1.time }
-            .filter { $0 >= NoteMovement.localFloorBeatInterval }
-        guard !intervals.isEmpty else { return 0.5 }
-        intervals.sort()
-        return intervals.count % 2 == 1
-            ? intervals[intervals.count / 2]
-            : (intervals[intervals.count / 2 - 1] + intervals[intervals.count / 2]) / 2
+    var visualMaximumLead: Double {
+        speedProfile.maximumLeadTime(baseLead: approachTime)
     }
+
+    var dynamicSpeedIsEnabled: Bool { settings.dynamicSpeedEnabled }
     var multiplier: Int { score.multiplier }
 
     /// 0…1 subtle background pulse that fires when the audio clock crosses a
@@ -366,6 +372,7 @@ final class GameEngine: ObservableObject {
     /// nil (production) uses the real AVAudioPlayer-backed clock.
     init(audioURL: URL, songTitle: String, chart: Chart, analysis: AudioAnalysis?,
          settings: SettingsStore, practice: PracticeConfig? = nil,
+         enhancedSpeedPoints: [DynamicSpeedProfile.SpeedCurvePoint]? = nil,
          player: AudioPlayer? = nil) {
         self.audioURL = audioURL
         self.songTitle = songTitle
@@ -373,8 +380,14 @@ final class GameEngine: ObservableObject {
         self.analysis = analysis
         self.settings = settings
         self.practice = practice
+        self.enhancedSpeedPoints = enhancedSpeedPoints
         self.player = player ?? AudioPlayer()
         self.effectiveReducedHaptics = settings.reducedHaptics
+        self.longestHoldDuration = chart.notes.filter { $0.type == .hold }.map(\.duration).max() ?? 0
+        self.speedProfile = DynamicSpeedProfile.make(analysis: analysis, chart: chart,
+                                                      enabled: settings.dynamicSpeedEnabled,
+                                                      intensity: settings.dynamicSpeedIntensity,
+                                                      enhancedPoints: enhancedSpeedPoints)
     }
 
     // MARK: - Lifecycle
@@ -438,9 +451,13 @@ final class GameEngine: ObservableObject {
         counts = [:]
         result = nil
         currentTime = 0
+        displayProgress = 0
         beatPulse = 0
         beatIndex = 0
         autoplayCursor = 0   // autoplay mode survives restarts; the cursor rewinds
+        renderLatencyForRun = nil
+        recentTapDeltasMs.removeAll(keepingCapacity: true)
+        recentTapBiasCount = 0
         holds.cancelAll()
         touchesDown = []
 
@@ -469,6 +486,10 @@ final class GameEngine: ObservableObject {
 
         player.play(from: 0)
         state = .playing
+        // Establish the wall/audio anchor immediately so the first display
+        // refresh cannot show a stale zero-time frame. The latency sample is
+        // captured on the first logic tick, after the route has settled.
+        refreshRenderAnchor(captureLatency: false, allowDiscontinuity: true)
         // Output latency is measurable once the session/route is live; the
         // session activation from load() may still be in flight, so sample
         // now and again shortly after — the EMA converges within ~3 reads.
@@ -498,6 +519,7 @@ final class GameEngine: ObservableObject {
     func pause() {
         guard state == .playing else { return }
         player.pause()
+        refreshRenderAnchor(allowDiscontinuity: true)
         hapticScheduler?.stop()
         // Held notes are released by pausing (the finger is gone). The head tap
         // keeps its judgment — only the hold bonus is forfeited, no combo break.
@@ -513,6 +535,7 @@ final class GameEngine: ObservableObject {
     func resume() {
         guard state == .paused else { return }
         player.resume()
+        refreshRenderAnchor(allowDiscontinuity: true)
         hapticScheduler?.reset()
         state = .playing
         #if DEBUG
@@ -536,6 +559,9 @@ final class GameEngine: ObservableObject {
         timer = nil
         loopGeneration += 1
         player.stop()
+        renderLatencyForRun = nil
+        renderAnchorDate = 0
+        renderAnchorAudio = 0
         haptics.stopAll()
         hapticScheduler = nil
         holds.cancelAll()
@@ -563,6 +589,7 @@ final class GameEngine: ObservableObject {
                   audioTime: player.currentTime)
         #endif
         player.seek(to: section.start)
+        refreshRenderAnchor(allowDiscontinuity: true)
         rebuildPracticeState()
     }
 
@@ -584,6 +611,7 @@ final class GameEngine: ObservableObject {
         logAnchor("practiceWholeSong@0.000s", audioTime: player.currentTime)
         #endif
         player.seek(to: 0)
+        refreshRenderAnchor(allowDiscontinuity: true)
         rebuildPracticeState()
         endTime = min(duration - 0.4, chart.lastNoteTime + 2.0)
     }
@@ -595,6 +623,7 @@ final class GameEngine: ObservableObject {
         let clamped = min(max(speed, 0.5), 2.0)
         practiceSpeed = clamped
         player.setRate(clamped)
+        refreshRenderAnchor(allowDiscontinuity: true)
     }
 
     func setPracticeLoop(_ enabled: Bool) {
@@ -698,7 +727,7 @@ final class GameEngine: ObservableObject {
         debugLastTouch = DebugTouch(lane: lane, x: point.x, y: point.y, audioTime: audioTime,
                                     noteID: hit?.note.id,
                                     judged: hit.map { scheduler?.judgment(for: $0.index) } ?? nil,
-                                    deltaMs: hit.map { (audioTime - player.outputLatency - $0.note.time) * 1000 })
+                                    deltaMs: hit.map { (audioTime - player.outputLatency + settings.calibrationOffsetMs / 1000 - $0.note.time) * 1000 })
         #endif
         if let hit { registerHoldIfNeeded(hit, at: audioTime) }
     }
@@ -707,23 +736,16 @@ final class GameEngine: ObservableObject {
     /// lands spatially on the lane's unjudged candidate note's tile, that
     /// note is judged too — sliding across tiles behaves like tapping them.
     func handleLaneMove(lane: Int, point: CGPoint) {
-        guard state == .playing,
-              let scheduler, let judge else { return }
+        guard state == .playing else { return }
         let time = player.currentTime
-        let candidates = scheduler.nearestPerLane(to: time,
-                                                  window: judge.config.goodWindow + InputJudge.Config.edgeGrace)
-        guard let candidate = candidates[lane] else { return }
-        // Spatial catch uses the per-moment lead, matching the renderer.
-        let distance = SpatialCatch.distance(
-            noteTime: candidate.note.time, touchTime: time, touchY: Double(point.y),
-            leadTime: dynamicLead(at: time), hitLineY: PlayfieldGeometry.hitLineY, topY: PlayfieldGeometry.topY,
-            tileHeightFraction: PlayfieldGeometry.tileHeightFraction,
-            holdTailTime: candidate.note.type == .hold
-                ? candidate.note.time + candidate.note.duration : nil)
-        guard distance <= PlayfieldGeometry.spatialCatchDistance else { return }
-        let judgment = judge.classifyForgiving(tapTime: time, noteTime: candidate.note.time)
-        apply(judgment, index: candidate.index, lane: lane, time: time, strength: candidate.note.strength)
-        if judgment != .miss { registerHoldIfNeeded((candidate.note, candidate.index), at: time) }
+        // Movement events are spatial-only: sliding a finger should catch a
+        // visible tile, but it must not accidentally judge a note merely
+        // because the note happens to be near the timing line. The shared
+        // judge path still supplies latency compensation, telemetry, replay
+        // recording, and the exact renderer projection.
+        if let hit = judgeTap(lane: lane, at: time, point: point, spatialOnly: true) {
+            registerHoldIfNeeded(hit, at: time)
+        }
     }
 
     /// Handles a touch-up on a lane. Releases any active hold: at (or within
@@ -736,8 +758,7 @@ final class GameEngine: ObservableObject {
     func handleTouchUp(lane: Int) {
         touchesDown.remove(lane)
         guard state == .playing else { return }
-        let releaseTime = isAutoplay ? player.currentTime
-            : player.currentTime - player.outputLatency + settings.calibrationOffsetMs / 1000
+        let releaseTime = judgedTime(for: player.currentTime)
         guard let result = holds.release(lane: lane, at: releaseTime) else { return }
         if result.completed {
             completeHold(hold: result.hold, at: player.currentTime)
@@ -789,11 +810,12 @@ final class GameEngine: ObservableObject {
     /// floor of GOOD — tapping the tile you see can never hard-fail. Notes
     /// near the hit line still use pure timing. Autoplay/synthetic taps keep
     /// the pure time-first path.
-    private func judgeTap(lane: Int, at time: Double, point: CGPoint) -> (note: ChartNote, index: Int)? {
+    private func judgeTap(lane: Int, at time: Double, point: CGPoint,
+                          spatialOnly: Bool = false) -> (note: ChartNote, index: Int)? {
         guard let scheduler, let judge else { return nil }
         // Autoplay taps at exact chart times (latency 0, calibration must
         // not perturb validation) — keep the pure path bit-identical.
-        let heardTime = isAutoplay ? time : time - player.outputLatency + settings.calibrationOffsetMs / 1000
+        let heardTime = isAutoplay ? time : projectionTime(for: time)
         let window = judge.config.goodWindow + InputJudge.Config.edgeGrace
 
         // Spatial path: a real finger position tries tile matching first.
@@ -802,13 +824,16 @@ final class GameEngine: ObservableObject {
             let lead = dynamicLead(at: time)
             let candidates = scheduler.nearestPerLane(to: time, window: max(window, lead))
             if let candidate = candidates[lane] {
-                let distance = SpatialCatch.distance(
-                    noteTime: candidate.note.time, touchTime: time, touchY: Double(point.y),
-                    leadTime: lead, hitLineY: PlayfieldGeometry.hitLineY,
-                    topY: PlayfieldGeometry.topY,
-                    tileHeightFraction: PlayfieldGeometry.tileHeightFraction,
-                    holdTailTime: candidate.note.type == .hold
-                        ? candidate.note.time + candidate.note.duration : nil)
+                let headProgress = visualProgress(noteTime: candidate.note.time, at: projectionTime(for: time))
+                let tailProgress = candidate.note.type == .hold
+                    ? visualProgress(noteTime: candidate.note.time + candidate.note.duration, at: projectionTime(for: time))
+                    : nil
+                let distance = SpatialCatch.distance(headProgress: headProgress,
+                                                      tailProgress: tailProgress,
+                                                      touchY: Double(point.y),
+                                                      hitLineY: PlayfieldGeometry.hitLineY,
+                                                      topY: PlayfieldGeometry.topY,
+                                                      tileHeightFraction: PlayfieldGeometry.tileHeightFraction)
                 if distance <= PlayfieldGeometry.spatialCatchDistance {
                     // Judgment floor: a tap physically ON a visible tile is
                     // at worst a GOOD — the player aimed correctly; only the
@@ -830,6 +855,8 @@ final class GameEngine: ObservableObject {
                 }
             }
         }
+
+        if spatialOnly { return nil }
 
         // Timing path: notes within the classic window of the hit line,
         // measured against the heard time.
@@ -865,8 +892,12 @@ final class GameEngine: ObservableObject {
         // The hold must begin when the finger actually goes down, not at the
         // future chart timestamp; otherwise the visible fill jumps forward and
         // a short hold can appear to complete immediately. Autoplay still uses
-        // the exact head timestamp.
-        let pressTime = min(time ?? player.currentTime, endTime - 0.001)
+        // the exact head timestamp. Real touches use the same heard-time
+        // coordinate as release, so partial progress is proportional.
+        let rawPressTime = min(time ?? player.currentTime, endTime - 0.001)
+        let pressTime = isAutoplay
+            ? rawPressTime
+            : judgedTime(for: rawPressTime)
         guard pressTime < endTime else { return }
         holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
                     startTime: pressTime, endTime: endTime)
@@ -908,11 +939,27 @@ final class GameEngine: ObservableObject {
     func holdActive(lane: Int) -> Bool { holds.isActive(lane: lane) }
     func holdCompleted(id: Int) -> Bool { holds.state(for: id) == .completed }
     func holdTailTime(lane: Int) -> Double? { holds.activeHold(lane: lane)?.endTime }
+    func holdStartTime(lane: Int) -> Double? { holds.activeHold(lane: lane)?.startTime }
     func recordedHoldProgress(id: Int) -> Double? { holds.recordedProgress(noteID: id) }
     /// Explicit lifecycle state for a note (notStarted default).
     func holdState(for noteID: Int) -> HoldState { holds.state(for: noteID) }
-    /// 0…1 sustain progress while a hold is active (nil otherwise).
-    func holdProgress(lane: Int) -> Double? { holds.progress(lane: lane, at: player.currentTime) }
+    /// 0…1 sustain progress while an active hold is rendered. When `at` is
+    /// supplied it is already the renderer's latency-compensated absolute
+    /// song time; subtracting output latency again would make the fill lag
+    /// behind the head/tail during dynamic-speed sections. The no-argument
+    /// path converts the raw audio clock exactly once for non-render callers.
+    func holdProgress(lane: Int, at time: Double? = nil) -> Double? {
+        let sustainTime: Double
+        if let time {
+            sustainTime = isAutoplay ? time : time + settings.calibrationOffsetMs / 1000
+        } else {
+            let projected = isAutoplay
+                ? player.currentTime
+                : projectionTime(for: player.currentTime)
+            sustainTime = isAutoplay ? projected : projected + settings.calibrationOffsetMs / 1000
+        }
+        return holds.progress(lane: lane, at: sustainTime)
+    }
 
     // MARK: - Rendering queries
 
@@ -924,7 +971,8 @@ final class GameEngine: ObservableObject {
     /// play the brief hit effect from the exact moment it happened.
     func visibleNotes(at time: Double) -> [(note: ChartNote, judged: Judgment?, judgedAt: Double?)] {
         guard let scheduler else { return [] }
-        let range = (time - 2.6)...(time + dynamicLead(at: time) + 0.4)
+        let longestHold = longestHoldDuration + 0.3
+        let range = (time - max(2.6, longestHold))...(time + visualMaximumLead + 0.4)
         return scheduler.notes(in: range).map {
             ($0.note, scheduler.judgment(for: $0.index), scheduler.judgmentTime(for: $0.index))
         }
@@ -932,13 +980,51 @@ final class GameEngine: ObservableObject {
 
     // MARK: - Internals
 
+    private func projectionTime(for rawTime: Double) -> Double {
+        rawTime - (renderLatencyForRun ?? max(0, player.outputLatency))
+    }
+
+    private func judgedTime(for rawTime: Double) -> Double {
+        guard !isAutoplay else { return rawTime }
+        return projectionTime(for: rawTime) + settings.calibrationOffsetMs / 1000
+    }
+
+    private func refreshRenderAnchor(captureLatency: Bool = true,
+                                     allowDiscontinuity: Bool = false) {
+        if captureLatency, renderLatencyForRun == nil {
+            let sample = player.outputLatency
+            renderLatencyForRun = sample.isFinite ? min(0.5, max(0, sample)) : 0
+        }
+        let now = Date().timeIntervalSinceReferenceDate
+        let latency = renderLatencyForRun ?? max(0, player.outputLatency)
+        let sampledAudio = player.currentTime - latency
+
+        // A display frame can be ahead of the last 60 Hz logic tick. Replacing
+        // the anchor with that tick's raw sample would make the next Canvas
+        // frame move backward whenever the timer fired a little late or the
+        // audio clock rounded differently. During uninterrupted playback keep
+        // the larger of the sampled clock and the already-projected clock;
+        // this correction is monotonic and therefore cannot teleport a visible
+        // tile backward. Explicit seeks, restarts, pause/resume, and rate
+        // changes opt into a deliberate re-anchor below.
+        if !allowDiscontinuity, renderAnchorDate > 0, state == .playing {
+            let elapsed = max(0, now - renderAnchorDate)
+            let projectedAudio = renderAnchorAudio + elapsed * max(0, player.rate)
+            renderAnchorDate = now
+            renderAnchorAudio = max(sampledAudio, projectedAudio)
+        } else {
+            renderAnchorDate = now
+            renderAnchorAudio = sampledAudio
+        }
+    }
+
     private func tick() {
         guard state == .playing, let scheduler, let judge else { return }
         let t = player.currentTime
+        let gameplayTime = judgedTime(for: t)
         currentTime = t
         // Refresh the render anchor (wall → audio mapping for the view).
-        renderAnchorDate = Date().timeIntervalSinceReferenceDate
-        renderAnchorAudio = t - player.outputLatency
+        refreshRenderAnchor()
         // Coarse HUD progress: publish only on a real move (≥0.25%).
         let total = duration
         if total > 0 {
@@ -947,7 +1033,7 @@ final class GameEngine: ObservableObject {
                 displayProgress = progress
             }
         }
-        updateBeatPulse(t)
+        updateBeatPulse(renderTime)
         #if DEBUG
         recordDebugTick(audioTime: t)
         #endif
@@ -959,15 +1045,15 @@ final class GameEngine: ObservableObject {
         // Hold completions: the finger (or autoplay) has sustained past the
         // tail on the audio clock.
         if !holds.active.isEmpty {
-            let due = holds.active.filter { t >= $0.value.endTime && (isAutoplay || touchesDown.contains($0.key)) }
+            let due = holds.active.filter { gameplayTime >= $0.value.endTime && (isAutoplay || touchesDown.contains($0.key)) }
             for (lane, _) in due {
                 if let hold = holds.complete(lane: lane) {
-                    completeHold(hold: hold, at: t)
+                    completeHold(hold: hold, at: gameplayTime)
                 }
             }
         }
 
-        for index in scheduler.pendingMisses(before: t, window: judge.config.missWindow) {
+        for index in scheduler.pendingMisses(before: gameplayTime, window: judge.config.missWindow) {
             let note = scheduler.sortedNotes[index]
             #if DEBUG
             recordDebugHit(judgment: .miss, noteTime: note.time, tapTime: t)
@@ -981,12 +1067,12 @@ final class GameEngine: ObservableObject {
             // Anchor the judgment at the DECLARATION instant (t), not the
             // note's crossing time: the miss tile effect must start only once
             // the game has actually decided the note is missed.
-            apply(.miss, index: index, lane: note.lane, time: t, strength: 0)
+            apply(.miss, index: index, lane: note.lane, time: gameplayTime, strength: 0)
         }
 
         // Practice loop: at the section end, restart it with fully reset state.
         if isPractice, let section = practiceSection, practiceLoopEnabled,
-           PracticeClock.shouldRestartLoop(contentTime: t, sectionEnd: section.end, loop: true) {
+           PracticeClock.shouldRestartLoop(contentTime: gameplayTime, sectionEnd: section.end, loop: true) {
             practiceJump(to: section)
             return
         }

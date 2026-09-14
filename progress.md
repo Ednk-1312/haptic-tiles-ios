@@ -1,8 +1,8 @@
 # Haptic Tiles / Music Haptics — Project Progress
 
 **App:** Haptic Piano (bundle `com.eshannandakumarpersonalteam.MusicHaptics`)
-**Current version:** 1.1 (11) · **539 automated tests, all passing**
-**Last updated:** September 12, 2026
+**Current version:** 1.1 (14) · **584 automated tests, all passing**
+**Last updated:** September 13, 2026
 
 ---
 
@@ -54,13 +54,14 @@ A complete, testable four-lane rhythm game that plays YOUR music:
   regenerate automatically when the version changes.
 - **Gameplay engine** (`Game/`): audio-clock-driven (AVAudioPlayer device-time
   anchored, never wall-clock drift), 60 Hz main-loop tick with generation guards
-  (exactly one live loop per session), spatial tile catching (tapping the tile
-  you SEE works anywhere in the lane), timing-window judgment (Perfect/Great/
+  (exactly one live loop per session), a display-synchronized Canvas timeline,
+  absolute-time integrated tile projection, spatial tile catching (tapping the
+  tile you SEE works anywhere in the lane), timing-window judgment (Perfect/Great/
   Good/Miss with user calibration), combo/multiplier scoring, hold notes,
-  Core Haptics profiles (musical/beat-focused/strong/minimal), and an optional
-  per-moment dynamic tile speed (±12% around the user's Note Speed, driven by
-  the locally detected tempo — one shared curve for rendering AND hit detection,
-  so what you see is exactly what you hit).
+  Core Haptics profiles (musical/beat-focused/strong/minimal), and a deterministic
+  Standard Math + optional Foundation Models intelligence layer. Dynamic Speed is
+  a precomputed, section-aware visual curve (with difficulty scaling) shared by
+  rendering and spatial catch; scoring timestamps and hit windows never change.
 - **App shell** (`App/`): `AppState` owns a single preparation boundary —
   analysis/chart generation runs as cancellable, token-guarded pipelines with a
   durable `PipelineStatus` surface (queued → analyzing → charting → ready /
@@ -72,14 +73,19 @@ A complete, testable four-lane rhythm game that plays YOUR music:
   practice setup, audio probe), Game (full-bleed playfield + safe-area HUD),
   Results (milestones, replay, run analytics), Settings, Calibration, Replay
   viewer. Artwork-derived background themes (palette extraction, blur, energy
-  variants) built OFF the main thread and cached per artwork.
+  variants) built OFF the main thread and cached per artwork. Gameplay rendering
+  now has one full-screen geometry owner, one four-lane touch surface, a
+  display-synchronized Canvas, and no production debug/autoplay control cluster.
 - **Accessibility**: VoiceOver lane buttons with position-based labels, live
   score/combo announcements (throttled), Reduce Motion honored everywhere,
-  reduced haptics, bounded Dynamic Type in gameplay.
-- **Quality gates**: 539 XCTests covering pure math (geometry, timing curves,
-  tempo models), the full input pipeline (stress: rapid taps, chords, cancels,
-  pause-during-hold), chart generation determinism/lane balance/sync, the
-  analysis pipeline, persistence, and the app shell's cancellation semantics.
+  reduced haptics, bounded Dynamic Type in gameplay, and reduced visual speed
+  variation without changing the authoritative gameplay timeline.
+- **Quality gates**: 584 XCTests covering pure math (geometry, timing curves,
+  tempo models, absolute projections), the full input pipeline (stress: rapid
+  taps, chords, cancels, pause-during-hold), hold synchronization and measured
+  partial progress, chart generation determinism/lane balance/sync, the
+  analysis pipeline, persistence, AI availability/fallback/validation, and the
+  app shell's cancellation semantics.
 
 ---
 
@@ -197,7 +203,93 @@ recorded progress surface. All prior suites still pass: **539/539**.
 
 ---
 
-## 5. Version / build history
+## 5. Enhanced intelligence, hold synchronization, and rendering pass
+
+This pass preserves the authoritative audio-time engine and adds an optional
+analysis tier above it. It does not let AI, Dynamic Speed, backgrounds, haptics,
+or UI state mutate scoring timestamps, hit windows, audio time, input state, or
+judgment classification.
+
+### Two-tier gameplay intelligence
+
+- **Every device — Standard Math Engine:** `StandardMathIntensityAnalyzer` builds
+  a deterministic, bounded curve from chart density, simultaneous notes/chords,
+  section energy, and semantic section labels. It uses two-pass smoothing and
+  broad four-second buckets, so isolated notes cannot make speed oscillate.
+- **Foundation Models-capable devices — Enhanced On-Device AI:**
+  `OnDeviceAIService` refreshes `SystemLanguageModel.default.availability` on
+  iOS 26 and only enters the enhanced path for the OS-reported `.available`
+  state. It sends a compact, bounded `GameplayAIContext` containing note timing
+  summaries, intervals, density spikes, chords, holds, lane travel, section
+  energy, and the prepared Standard Math speed curve to Apple's local model.
+  The model returns structured speed-intensity points, chart-quality findings,
+  and optional difficulty/hold/chord recommendations. It never receives raw
+  audio, user identity, or network data.
+- **Deterministic boundary:** all model points are sorted, clamped to the song
+  duration and normalized range, deduplicated, bounded to 24 points, and must
+  contain a usable curve before acceptance. Findings are bounded to 24 entries
+  with bounded text/severity/section indices. Cached plans are rejected when
+  song ID, chart version, note count, duration, schema, model version, or
+  intensity no longer match. Invalid, missing, unavailable, or timed-out output
+  falls back to Standard Math without delaying gameplay.
+- **Actual product effect:** an accepted plan changes only the pre-game visual
+  Dynamic Speed curve. Recommendations and findings are advisory and stored for
+  diagnostics/product surfaces; they do not silently apply difficulty, rewrite
+  chart events, alter score, or make accuracy look better. Player history
+  analysis runs only after results/settings while idle and is cancelled before
+  the next session.
+
+### Confirmed hold and rendering fixes
+
+- Hold head, body, tail, active fill, spatial catch, and release now use the same
+  prepared `DynamicSpeedProfile` and absolute-time integrated projection. There
+  is no second fixed-pixels-per-second hold animation. The tail remains tied to
+  its chart end timestamp through slow → fast → slow regions.
+- Hold progress is measured from the authoritative sustain timestamp, not frames,
+  timer ticks, distance, or an animation duration. A real body press anchors the
+  sustain at the actual press time; autoplay anchors at the chart head. Release
+  computes its fraction before removing the active hold, so partial bonuses and
+  the temporary visual state reflect the actual amount held.
+- The Canvas uses `TimelineView(.animation)` for display cadence while the logic
+  timer remains responsible for deterministic scoring/state. A stable per-run
+  latency sample and monotonic wall/audio render anchor prevent route-latency or
+  timer jitter from re-positioning existing notes backward. `drawingGroup()` and
+  coarse HUD/background publications reduce main-thread SwiftUI churn.
+- The playfield is owned by one root geometry contract and one four-lane input
+  surface. The HUD uses real safe-area insets and a width-safe score block, so
+  the Dynamic Island cannot clip the score or split the playfield. The former
+  debug/autoplay control cluster is not present in the production HUD. The old
+  top gray rectangular scrim was removed rather than covered; gameplay now has
+  one lightweight score panel instead of an extra full-width compositing layer.
+- Reduce Motion now disables section speed variation and softens sensory effects
+  without changing scoring fairness. Dynamic Speed OFF produces a constant
+  profile and skips dynamic calculations. Difficulty still changes stable speed,
+  dynamic response, chart density, and chart-generation behavior through the
+  existing difficulty model.
+
+### Validation evidence
+
+- Focused iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **37 tests, 0
+  failures** across `GameplayIntelligenceTests`, `DynamicSpeedTests`, and
+  `HoldDurationTests`.
+- Full iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **584 tests, 0 failures**
+  in 73.736 seconds. Build/test output contained no compiler warning/error
+  diagnostics. The only tool warning was Xcode's benign AppIntents metadata
+  notice for the test target, which has no AppIntents dependency.
+- The focused regression set covers model-output sanitization/fallback,
+  availability-tier derivation, context capture for chords/holds/sections,
+  absolute projection monotonicity/continuity/frame-cadence independence,
+  slow → fast → slow hold endpoints, musical hold duration, difficulty ordering,
+  Dynamic Speed OFF, intensity range, and unchanged note timestamps.
+- The simulator exercised unavailable Foundation Models fallback behavior and
+  the full deterministic path. Foundation Models `.available` inference was
+  not observed in this simulator run; no model download or successful live
+  Foundation Models response is claimed. Physical iPhone installation was not
+  part of this validation pass.
+
+---
+
+## 6. Version / build history
 
 | Version | Build | Milestone |
 |---|---|---|
@@ -205,12 +297,14 @@ recorded progress surface. All prior suites still pass: **539/539**.
 | 1.1 | 5–8 | Feature expansion, settings hardening, HUD fix |
 | 1.1 | 9–10 | Bug-fix audit (settings slider ranges, AI hardening, regression tests) |
 | 1.1 | 11 | Magic Tiles 3 sync (onset-first charting v5), dynamic speed, touch/hold fixes |
-| 1.1 | 11 | This pass: geometry restructure, stutter/flash fixes, proportional holds |
+| 1.1 | 11 | Geometry/stutter/flash fix, safe-area HUD, proportional holds |
+| 1.1 | 14 | Two-tier gameplay intelligence, bounded Foundation Models planning,
+  integrated hold projection, and production gameplay rendering cleanup |
 
 Deliverable pipeline: `xcodebuild archive` → signed IPA on the Desktop
 (`Haptic Piano …ipa`) → `devicectl device install app` to a connected iPhone.
 
-## 6. Known-good baselines
+## 7. Known-good baselines
 
 - `git` history: `ba53753` initial template → `9150f99` Alpha 1 full
   implementation (294 files) → this commit (bug-fix pass).
@@ -219,7 +313,7 @@ Deliverable pipeline: `xcodebuild archive` → signed IPA on the Desktop
 - `.gitignore` covers `LogicTests/.build/` (865 MB of SwiftPM artifacts),
   `.freebuff/`, `.DS_Store`, and AI training venv/data/output.
 
-## 7. What's next (candidates, not commitments)
+## 8. What's next (candidates, not commitments)
 
 - Commit + tag the current state; set up a remote backup.
 - On-device Instruments pass (Time Profiler + Core Animation FPS) to verify the

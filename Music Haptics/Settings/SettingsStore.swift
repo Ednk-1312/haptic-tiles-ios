@@ -25,6 +25,8 @@ final class SettingsStore: ObservableObject {
     @Published var preferredDifficulty: DifficultyLevel { didSet { save() } }
     @Published var noteApproachTime: Double { didSet { save() } }        // seconds, note travel time
     @Published var visualEffects: VisualEffectLevel { didSet { save() } }
+    @Published var dynamicSpeedEnabled: Bool { didSet { save() } }
+    @Published var dynamicSpeedIntensity: DynamicSpeedIntensity { didSet { save() } }
     @Published var calibrationOffsetMs: Double { didSet { save() } }     // -100…+100
     @Published var perfectWindowMs: Double { didSet { save() } }
     @Published var greatWindowMs: Double { didSet { save() } }
@@ -56,7 +58,9 @@ final class SettingsStore: ObservableObject {
     @Published var autoDifficulty: Bool { didSet { save() } }
     @Published var experimentalAIMode: Bool { didSet { save() } }        // reserved
 
-    // On-device AI (developer-configurable; deterministic systems stay dominant)
+    // On-device AI (optional system Foundation Models tier; never required for play)
+    @Published var onDeviceAIEnabled: Bool { didSet { save() } }
+    // Existing bundled Core ML chart-generation controls (developer-configurable)
     @Published var aiEnabled: Bool { didSet { save() } }
     @Published var aiDifficultyWeight: Double { didSet { save() } }      // 0…1, 0.3 = deterministic dominant
     @Published var aiEventWeight: Double { didSet { save() } }           // 0…1
@@ -115,6 +119,8 @@ final class SettingsStore: ObservableObject {
         noteApproachTime = Self.clamp(d.object(forKey: Keys.noteApproachTime) as? Double ?? 1.8,
                                       to: SettingsRange.noteApproachTime)
         visualEffects = VisualEffectLevel(rawValue: d.string(forKey: Keys.visualEffects) ?? "") ?? .full
+        dynamicSpeedEnabled = d.object(forKey: Keys.dynamicSpeedEnabled) as? Bool ?? true
+        dynamicSpeedIntensity = DynamicSpeedIntensity(rawValue: d.string(forKey: Keys.dynamicSpeedIntensity) ?? "") ?? .standard
         calibrationOffsetMs = Self.clamp(d.object(forKey: Keys.calibration) as? Double ?? 0,
                                          to: SettingsRange.calibrationOffsetMs)
         perfectWindowMs = Self.clamp(d.object(forKey: Keys.perfectWindow) as? Double ?? 70,
@@ -139,6 +145,7 @@ final class SettingsStore: ObservableObject {
                                             to: SettingsRange.chartDensityMultiplier)
         autoDifficulty = d.object(forKey: Keys.autoDifficulty) as? Bool ?? true
         experimentalAIMode = d.object(forKey: Keys.aiMode) as? Bool ?? false
+        onDeviceAIEnabled = d.object(forKey: Keys.onDeviceAIEnabled) as? Bool ?? false
         let defaultConfig = AIFusionConfig.default
         aiEnabled = d.object(forKey: Keys.aiEnabled) as? Bool ?? defaultConfig.enabled
         aiDifficultyWeight = Self.clamp(d.object(forKey: Keys.aiDifficultyWeight) as? Double ?? defaultConfig.difficultyAIWeight,
@@ -195,6 +202,8 @@ final class SettingsStore: ObservableObject {
         static let preferredDifficulty = "settings.preferredDifficulty"
         static let noteApproachTime = "settings.noteApproachTime"
         static let visualEffects = "settings.visualEffects"
+        static let dynamicSpeedEnabled = "settings.dynamicSpeedEnabled"
+        static let dynamicSpeedIntensity = "settings.dynamicSpeedIntensity"
         static let calibration = "settings.calibrationOffsetMs"
         static let perfectWindow = "settings.perfectWindowMs"
         static let greatWindow = "settings.greatWindowMs"
@@ -210,6 +219,7 @@ final class SettingsStore: ObservableObject {
         static let chartDensity = "settings.chartDensityMultiplier"
         static let autoDifficulty = "settings.autoDifficulty"
         static let aiMode = "settings.experimentalAI"
+        static let onDeviceAIEnabled = "settings.onDeviceAIEnabled"
         static let aiEnabled = "settings.aiEnabled"
         static let aiDifficultyWeight = "settings.aiDifficultyWeight"
         static let aiEventWeight = "settings.aiEventWeight"
@@ -235,6 +245,8 @@ final class SettingsStore: ObservableObject {
         d.set(preferredDifficulty.rawValue, forKey: Keys.preferredDifficulty)
         d.set(noteApproachTime, forKey: Keys.noteApproachTime)
         d.set(visualEffects.rawValue, forKey: Keys.visualEffects)
+        d.set(dynamicSpeedEnabled, forKey: Keys.dynamicSpeedEnabled)
+        d.set(dynamicSpeedIntensity.rawValue, forKey: Keys.dynamicSpeedIntensity)
         d.set(calibrationOffsetMs, forKey: Keys.calibration)
         d.set(perfectWindowMs, forKey: Keys.perfectWindow)
         d.set(greatWindowMs, forKey: Keys.greatWindow)
@@ -249,6 +261,7 @@ final class SettingsStore: ObservableObject {
         d.set(chartDensityMultiplier, forKey: Keys.chartDensity)
         d.set(autoDifficulty, forKey: Keys.autoDifficulty)
         d.set(experimentalAIMode, forKey: Keys.aiMode)
+        d.set(onDeviceAIEnabled, forKey: Keys.onDeviceAIEnabled)
         d.set(aiEnabled, forKey: Keys.aiEnabled)
         d.set(aiDifficultyWeight, forKey: Keys.aiDifficultyWeight)
         d.set(aiEventWeight, forKey: Keys.aiEventWeight)

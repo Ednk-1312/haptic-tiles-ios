@@ -148,7 +148,8 @@ struct GameSessionView: View {
                                                        chart: session.chart,
                                                        analysis: session.analysis,
                                                        settings: settings,
-                                                       practice: session.practice))
+                                                       practice: session.practice,
+                                                       enhancedSpeedPoints: session.enhancedSpeedPoints))
     }
 
     var body: some View {
@@ -173,13 +174,10 @@ struct GameSessionView: View {
                 playfieldLayer(in: proxy.size)
                     .frame(width: proxy.size.width, height: proxy.size.height)
 
-                hudScrim
-                    .frame(width: proxy.size.width, height: proxy.size.height,
-                           alignment: .top)
-
-                // Keep gameplay art edge-to-edge, but explicitly inset only the
-                // controls. This prevents the Dynamic Island from cropping
-                // the score while never shrinking the four-lane board.
+                // The score block owns its own contrast. Keeping the gameplay
+                // field free of a separate top gradient avoids a rectangular
+                // gray veil under the Dynamic Island and eliminates one full-
+                // screen compositing layer from every frame.
                 VStack(spacing: 0) {
                     topProgress
                     hud
@@ -255,6 +253,12 @@ struct GameSessionView: View {
         // Dynamic Type so accessibility text sizes can't break the playfield.
         .dynamicTypeSize(.xSmall...(.accessibility2))
         .onAppear {
+            // Apply accessibility presentation choices before the audio clock
+            // starts. Rebuilding the visual profile after playback begins could
+            // move visible tiles when the environment changes; the chart and
+            // scoring timeline remain untouched.
+            engine.setReducedHaptics(settings.reducedHaptics || reduceMotion)
+            engine.setReduceMotion(reduceMotion)
             engine.start()
             #if DEBUG
             // Launch-arg automation: `-debugOverlay` shows the lane-geometry
@@ -266,7 +270,6 @@ struct GameSessionView: View {
             // System accessibility preferences: Reduce Motion also softens
             // haptics (softer hits, no miss feedback) unless the user has an
             // explicit preference in Settings.
-            engine.setReducedHaptics(settings.reducedHaptics || reduceMotion)
             engine.announcementHandler = { [throttle = announcementThrottle] message in
                 throttle.post(message)
             }
@@ -397,47 +400,13 @@ struct GameSessionView: View {
                         .background(.mint.opacity(0.16), in: Capsule())
                         .accessibilityLabel("Practice mode")
                 }
-                #if DEBUG
-                if engine.isAutoplay {
-                    Text("AUTOPLAY")
-                        .font(.system(size: 9, weight: .heavy).monospaced())
-                        .foregroundStyle(.yellow)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(.yellow.opacity(0.16), in: Capsule())
-                        .accessibilityLabel("Autoplay active")
-                }
-                #endif
             }
 
-
-
-            #if DEBUG
-            HStack(spacing: 8) {
-                Button {
-                    let enabled = !engine.isAutoplay
-                    engine.setAutoplay(enabled)
-                    onAutoplayChange?(enabled)
-                } label: {
-                    Image(systemName: engine.isAutoplay ? "play.circle.fill" : "play.circle")
-                        .font(.callout)
-                        .frame(width: 34, height: 34)
-                        .background(Color.black.opacity(0.6), in: Circle())
-                }
-                .accessibilityLabel(engine.isAutoplay ? "Disable autoplay" : "Enable autoplay (developer)")
-                Button {
-                    engine.cycleDebugOverlay()
-                } label: {
-                    Image(systemName: engine.debugChartMode ? "chart.bar.doc.horizontal" : "scope")
-                        .font(.caption)
-                        .frame(width: 34, height: 34)
-                        .background(Color.black.opacity(0.6), in: Circle())
-                }
-                .accessibilityLabel("Cycle developer diagnostics (timing → chart structure → off)")
-            }
-            .padding(.top, 6)
-            .padding(.trailing, 4)
-            #endif
+            // Developer controls stay available through launch arguments and
+            // diagnostics APIs, but never occupy the production gameplay HUD.
+            // The old autoplay/scope cluster was the second button seen beside
+            // Pause on Debug installs and could be mistaken for a Dynamic Island
+            // control.
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
@@ -535,16 +504,12 @@ struct GameSessionView: View {
         }
     }
 
-    /// Readability scrim behind the HUD so score/combo stay legible over art.
-    /// Whisper-light — the bright reference field stays dominant (the score
-    /// box itself carries the contrast).
+    /// The score card is the only HUD scrim. There used to be a separate
+    /// 160-point full-width gradient here; on a notched iPhone it read as a
+    /// gray rectangle/image at the top of gameplay and added an unnecessary
+    /// compositing layer. Contrast now comes from `centerScoreBlock` itself.
     private var hudScrim: some View {
-        LinearGradient(colors: [.black.opacity(0.16), .black.opacity(0.05), .clear],
-                       startPoint: .top, endPoint: .bottom)
-            .frame(height: 160)
-            .frame(maxHeight: .infinity, alignment: .top)
-            .ignoresSafeArea(edges: .top)
-            .allowsHitTesting(false)
+        EmptyView()
     }
 
     /// Thin full-width song-progress bar at the very top of the screen
@@ -847,7 +812,11 @@ struct GameView: View {
                             onFinishDecision: queueDecisionForFinish,
                             onAdvance: { advance(to: $0) },
                             onAutoplayChange: { autoplayChain = $0 },
-                            onFinished: { appState.recordResult($0, for: song.id) })
+                            onFinished: { result in
+                                let milestones = appState.recordResult(result, for: song.id)
+                                appState.schedulePlayerAnalysis(after: result)
+                                return milestones
+                            })
                 .id(session.id)
 
             if session.practice == nil {

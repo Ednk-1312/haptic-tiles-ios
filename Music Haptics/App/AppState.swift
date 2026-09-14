@@ -39,6 +39,9 @@ final class AppState {
     let settings: SettingsStore
     let mediaLibrary: MediaLibraryService
     let ai: AISystem
+    /// Optional system Foundation Models coordinator. It only prepares cached
+    /// pre-game speed advice; the standard math profile always remains usable.
+    let gameplayIntelligence: OnDeviceAIService
     /// In-app play queue with automatic song transitions.
     let queue: QueueManager
     /// Local playlists (on-device only — no accounts, no cloud).
@@ -66,6 +69,9 @@ final class AppState {
     /// Per-song run serial for task-identity cleanup (Task is a struct, so
     /// identity is tracked by serial instead of `===`).
     private var pipelineTaskIDs: [UUID: Int] = [:]
+    /// Optional post-game analysis task. It is cancelled before another
+    /// session starts so Foundation Models work never overlaps gameplay.
+    private var playerAnalysisTask: Task<Void, Never>?
 
     /// Durable operation state for the UI. Views never infer progress from a
     /// transient SwiftData enum or poll an object while an async task runs.
@@ -158,9 +164,14 @@ final class AppState {
         self.settings = settings
         self.mediaLibrary = mediaLibrary
         self.ai = ai ?? AISystem()
+        self.gameplayIntelligence = OnDeviceAIService()
+        self.gameplayIntelligence.settingsAllowsAnalysis = settings.onDeviceAIEnabled
         self.queue = QueueManager(snapshot: Self.validatedSnapshot(context: container.mainContext))
         self.playlists = PlaylistManager(snapshot: PlaylistStorage.load())
         self.stats = StatsManager(snapshot: StatsStorage.load())
+        Task { [weak self] in
+            await self?.gameplayIntelligence.refresh()
+        }
         recoverInterruptedPipelines()
     }
 
@@ -632,7 +643,18 @@ final class AppState {
             return nil
         }
         let analysis = try? ChartStorage.loadAnalysis(for: record.id)
-        return GameSession(chart: chart, analysis: analysis, audioURL: url, title: record.title)
+        let plan: PreparedGameplayPlan?
+        if settings.onDeviceAIEnabled && settings.dynamicSpeedEnabled {
+            plan = await gameplayIntelligence.prepareGameplayPlan(
+                songID: record.id, chart: chart, analysis: analysis, enabled: true,
+                intensity: settings.dynamicSpeedIntensity)
+        } else {
+            plan = nil
+        }
+        return GameSession(chart: chart, analysis: analysis, audioURL: url,
+                           title: record.title,
+                           enhancedSpeedPoints: plan?.points,
+                           enhancedGameplayPlan: plan)
     }
 
     /// Background pre-generation for a queued entry: resolves audio and
@@ -709,6 +731,31 @@ final class AppState {
         saveResult(result, for: songID)
         let chartVersion = try? ChartStorage.loadChart(for: songID, difficulty: result.difficulty)?.chartVersion
         return stats.record(result, for: songID, chartVersion: chartVersion)
+    }
+
+    /// Starts optional post-game analysis without delaying the results screen
+    /// or the next song. It receives only the already-local aggregate snapshot.
+    func analyzePlayerHistory(after result: GameplayResult) async {
+        gameplayIntelligence.settingsAllowsAnalysis = settings.onDeviceAIEnabled
+        guard settings.onDeviceAIEnabled else { return }
+        await gameplayIntelligence.analyzePlayerHistory(snapshot: stats.snapshot(),
+                                                        latestResult: result)
+    }
+
+    /// Schedules optional post-game analysis after the results state is shown.
+    /// A new session cancels the task before gameplay starts, so Foundation
+    /// Models work can never overlap active gameplay.
+    func schedulePlayerAnalysis(after result: GameplayResult) {
+        playerAnalysisTask?.cancel()
+        guard settings.onDeviceAIEnabled else { return }
+        gameplayIntelligence.settingsAllowsAnalysis = true
+        let snapshot = stats.snapshot()
+        let service = gameplayIntelligence
+        playerAnalysisTask = Task { @MainActor in
+            await service.refresh()
+            guard !Task.isCancelled, service.availability == .enhancedAvailable else { return }
+            await service.analyzePlayerHistory(snapshot: snapshot, latestResult: result)
+        }
     }
 
     /// Adds a song to the queue and starts preparing its chart in the
@@ -911,6 +958,8 @@ final class AppState {
     /// chart. No view polls SwiftData or owns a second loading lifecycle.
     func prepareSession(for record: SongRecord, difficulty: DifficultyLevel,
                         practice: PracticeConfig? = nil) async throws -> GameSession {
+        playerAnalysisTask?.cancel()
+        playerAnalysisTask = nil
         if record.analysisState == .imported {
             runPipeline(for: record)
         } else if record.analysisState != .ready {
@@ -948,8 +997,18 @@ final class AppState {
         }
         let chart = try await ensureChart(for: record, difficulty: difficulty)
         let analysis = try? ChartStorage.loadAnalysis(for: record.id)
+        let plan: PreparedGameplayPlan?
+        if settings.onDeviceAIEnabled && settings.dynamicSpeedEnabled {
+            plan = await gameplayIntelligence.prepareGameplayPlan(
+                songID: record.id, chart: chart, analysis: analysis, enabled: true,
+                intensity: settings.dynamicSpeedIntensity)
+        } else {
+            plan = nil
+        }
         return GameSession(chart: chart, analysis: analysis, audioURL: url,
-                           title: record.title, practice: practice)
+                           title: record.title, practice: practice,
+                           enhancedSpeedPoints: plan?.points,
+                           enhancedGameplayPlan: plan)
     }
 
     private func demoPracticeConfiguration() -> PracticeConfig? {

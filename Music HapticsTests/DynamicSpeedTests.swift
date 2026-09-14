@@ -131,4 +131,288 @@ final class DynamicSpeedTests: XCTestCase {
         // the point — the spatial path works through the dynamic lead.
         XCTAssertEqual(engine.counts[.good], 1, "spatial catch still works through the dynamic lead")
     }
+
+    // MARK: - Absolute projection regressions
+
+    func testProjectionIsMonotonicAcrossSpeedProfileBoundary() {
+        let profile = DynamicSpeedProfile(
+            duration: 12,
+            points: [
+                .init(time: 0, multiplier: 0.82),
+                .init(time: 2, multiplier: 1.30),
+                .init(time: 4, multiplier: 0.76),
+                .init(time: 8, multiplier: 1.18),
+                .init(time: 12, multiplier: 1.18)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .standard,
+            difficultyMultiplier: 1
+        )
+
+        let noteTime = 6.0
+        let spawnTime = noteTime - profile.leadTime(at: noteTime, baseLead: 1.8)
+        let values = stride(from: spawnTime, through: noteTime + 0.8, by: 0.01)
+            .map { profile.progress(noteTime: noteTime, currentTime: $0, baseLead: 1.8) }
+
+        for pair in zip(values, values.dropFirst()) {
+            XCTAssertLessThanOrEqual(pair.1, pair.0 + 0.000_001,
+                                     "absolute projection must never move a tile backward")
+        }
+        XCTAssertEqual(values.first ?? -1, 1, accuracy: 0.000_001)
+        XCTAssertEqual(profile.progress(noteTime: noteTime, currentTime: noteTime, baseLead: 1.8),
+                       0, accuracy: 0.000_001)
+    }
+
+    func testProjectionIsContinuousAtProfileBoundary() {
+        let profile = DynamicSpeedProfile(
+            duration: 8,
+            points: [
+                .init(time: 0, multiplier: 0.8),
+                .init(time: 2, multiplier: 1.4),
+                .init(time: 4, multiplier: 0.7),
+                .init(time: 8, multiplier: 1.1)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .standard,
+            difficultyMultiplier: 1
+        )
+
+        let noteTime = 5.0
+        let epsilon = 0.000_001
+        let before = profile.progress(noteTime: noteTime, currentTime: 2 - epsilon, baseLead: 1.8)
+        let at = profile.progress(noteTime: noteTime, currentTime: 2, baseLead: 1.8)
+        let after = profile.progress(noteTime: noteTime, currentTime: 2 + epsilon, baseLead: 1.8)
+
+        XCTAssertEqual(before, at, accuracy: 0.000_01)
+        XCTAssertEqual(at, after, accuracy: 0.000_01)
+    }
+
+    func testProjectionDependsOnlyOnAbsoluteTimeNotFrameSampling() {
+        let profile = DynamicSpeedProfile(
+            duration: 10,
+            points: [
+                .init(time: 0, multiplier: 0.9),
+                .init(time: 3, multiplier: 1.25),
+                .init(time: 6, multiplier: 0.85),
+                .init(time: 10, multiplier: 1.1)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .standard,
+            difficultyMultiplier: 1
+        )
+
+        let noteTime = 7.0
+        let sampleTimes = [1.25, 2.0, 3.0, 3.01, 4.5, 5.99, 6.0, 6.75]
+        let direct = sampleTimes.map {
+            profile.progress(noteTime: noteTime, currentTime: $0, baseLead: 1.8)
+        }
+        let repeated = sampleTimes.map {
+            // Sampling at a different cadence must not accumulate movement;
+            // the absolute-time query at the same timestamp is the contract.
+            profile.progress(noteTime: noteTime, currentTime: $0, baseLead: 1.8)
+        }
+
+        XCTAssertEqual(direct, repeated, "frame cadence must not affect tile position")
+    }
+
+    func testHoldProjectionRemainsMonotonicAcrossSlowFastSlowRegions() {
+        let profile = DynamicSpeedProfile(
+            duration: 14,
+            points: [
+                .init(time: 0, multiplier: 0.80),
+                .init(time: 3, multiplier: 0.82),
+                .init(time: 6, multiplier: 1.38),
+                .init(time: 9, multiplier: 0.76),
+                .init(time: 14, multiplier: 0.80)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .standard,
+            difficultyMultiplier: 1
+        )
+
+        let head = 3.5
+        let tail = 11.5
+        let spawn = head - profile.leadTime(at: head, baseLead: 1.8)
+        let samples = stride(from: spawn, through: tail + 0.5, by: 0.01).map { $0 }
+        let headProgress = samples.map {
+            profile.progress(noteTime: head, currentTime: $0, baseLead: 1.8)
+        }
+        let tailProgress = samples.map {
+            profile.progress(noteTime: tail, currentTime: $0, baseLead: 1.8)
+        }
+
+        for values in [headProgress, tailProgress] {
+            for pair in zip(values, values.dropFirst()) {
+                XCTAssertLessThanOrEqual(pair.1, pair.0 + 0.000_001,
+                                         "hold endpoints must never move backward through speed changes")
+            }
+        }
+        XCTAssertEqual(profile.progress(noteTime: head, currentTime: head, baseLead: 1.8),
+                       0, accuracy: 0.000_001)
+        XCTAssertEqual(profile.progress(noteTime: tail, currentTime: tail, baseLead: 1.8),
+                       0, accuracy: 0.000_001)
+    }
+
+    func testHoldMusicalDurationIsIndependentOfDynamicSpeed() {
+        let profile = DynamicSpeedProfile(
+            duration: 12,
+            points: [
+                .init(time: 0, multiplier: 0.78),
+                .init(time: 4, multiplier: 1.42),
+                .init(time: 8, multiplier: 0.74),
+                .init(time: 12, multiplier: 1.10)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .expressive,
+            difficultyMultiplier: 1
+        )
+        let head = 2.5
+        let tail = 10.5
+        XCTAssertEqual(profile.progress(noteTime: head, currentTime: head, baseLead: 1.8),
+                       0, accuracy: 0.000_001)
+        XCTAssertEqual(profile.progress(noteTime: tail, currentTime: tail, baseLead: 1.8),
+                       0, accuracy: 0.000_001)
+        XCTAssertGreaterThan(profile.progress(noteTime: tail, currentTime: head, baseLead: 1.8), 1,
+                              "before the tail's own spawn time, the tail remains offscreen; its musical endpoint is not a fixed visual distance")
+    }
+
+    // MARK: - Standard Math intensity and settings contract
+
+
+    private func makeChart(difficulty: DifficultyLevel = .medium,
+                           noteTimes: [Double]) -> Chart {
+        var chart = Chart(songID: UUID(), difficulty: difficulty,
+                          chartVersion: ChartStorage.chartVersion,
+                          seed: 42, notes: [],
+                          generatedAt: Date(timeIntervalSince1970: 0),
+                          nps: 0, duration: 24, difficultyScore: 5,
+                          validationWarnings: [], generationDuration: 0)
+        chart.notes = noteTimes.enumerated().map { index, time in
+            ChartNote(id: index, time: time, lane: index % 4,
+                      duration: 0, type: .tap, strength: 0.7)
+        }
+        return chart
+    }
+
+    private func sectionAnalysis() -> AudioAnalysis {
+        AudioAnalysis(duration: 24, sampleRate: 44_100, tempoBPM: 120,
+                       tempoConfidence: 0.9, beats: [], onsets: [], events: [],
+                       sections: [
+                           SongSection(index: 0, start: 0, end: 8,
+                                       label: .intro, energy: 0.15),
+                           SongSection(index: 1, start: 8, end: 16,
+                                       label: .chorus, energy: 1.0),
+                           SongSection(index: 2, start: 16, end: 24,
+                                       label: .breakdown, energy: 0.25)
+                       ], waveform: [], averageEnergy: 0.5,
+                       analysisDuration: 0.1, hopTime: 0.01)
+    }
+
+    func testStandardMathIsDeterministicAndBounded() {
+        let chart = makeChart(noteTimes: stride(from: 0.5, through: 23.5, by: 1.0).map { $0 })
+        let analysis = sectionAnalysis()
+        let first = StandardMathIntensityAnalyzer.make(chart: chart,
+                                                        analysis: analysis,
+                                                        duration: 24)
+        let second = StandardMathIntensityAnalyzer.make(chart: chart,
+                                                         analysis: analysis,
+                                                         duration: 24)
+        XCTAssertEqual(first, second)
+        XCTAssertGreaterThanOrEqual(first.count, 4)
+        XCTAssertEqual(first.first?.time, 0)
+        for point in first {
+            XCTAssertTrue(point.intensity.isFinite)
+            XCTAssertTrue((-1...1).contains(point.intensity))
+        }
+        for pair in zip(first, first.dropFirst()) {
+            XCTAssertLessThan(pair.0.time, pair.1.time)
+        }
+    }
+
+    func testStandardMathFollowsSparseDenseAndCalmSections() {
+        let sparseThenDense = makeChart(noteTimes:
+            [1, 3, 5, 7] + stride(from: 8.5, through: 15.5, by: 0.5).map { $0 }
+            + [17, 19, 21, 23])
+        let points = StandardMathIntensityAnalyzer.make(chart: sparseThenDense,
+                                                         analysis: sectionAnalysis(),
+                                                         duration: 24)
+        let intro = points.filter { $0.time < 8 }.map(\.intensity).reduce(0, +)
+            / Double(max(1, points.filter { $0.time < 8 }.count))
+        let chorus = points.filter { $0.time >= 8 && $0.time < 16 }.map(\.intensity).reduce(0, +)
+            / Double(max(1, points.filter { $0.time >= 8 && $0.time < 16 }.count))
+        let breakdown = points.filter { $0.time >= 16 }.map(\.intensity).reduce(0, +)
+            / Double(max(1, points.filter { $0.time >= 16 }.count))
+
+        XCTAssertGreaterThan(chorus, intro, "dense chorus should read as more intense than intro")
+        XCTAssertGreaterThan(chorus, breakdown, "calmer breakdown should read below chorus")
+    }
+
+    func testDynamicSpeedOffProducesStableProfile() {
+        let chart = makeChart(noteTimes: stride(from: 0.5, through: 23.5, by: 1.0).map { $0 })
+        let profile = DynamicSpeedProfile.make(analysis: sectionAnalysis(), chart: chart,
+                                                enabled: false, intensity: .expressive)
+        XCTAssertFalse(profile.enabled)
+        XCTAssertEqual(profile.points.count, 2)
+        XCTAssertEqual(profile.points[0].multiplier, chart.difficulty.visualSpeedMultiplier,
+                       accuracy: 0.000_001)
+        XCTAssertEqual(profile.points[0].multiplier, profile.points[1].multiplier,
+                       accuracy: 0.000_001)
+        XCTAssertEqual(profile.multiplier(at: 4), profile.multiplier(at: 20),
+                       accuracy: 0.000_001)
+    }
+
+    func testDifficultySpeedOrderingIsMeaningfulAndBounded() {
+        let chartNotes = stride(from: 0.5, through: 23.5, by: 0.75).map { $0 }
+        let profiles = DifficultyLevel.allCases.map { difficulty in
+            DynamicSpeedProfile.make(analysis: sectionAnalysis(),
+                                      chart: makeChart(difficulty: difficulty, noteTimes: chartNotes),
+                                      enabled: true, intensity: .standard)
+        }
+        let averages = profiles.map { profile in
+            profile.points.map(\.multiplier).reduce(0, +) / Double(profile.points.count)
+        }
+        for pair in zip(averages, averages.dropFirst()) {
+            XCTAssertLessThan(pair.0, pair.1,
+                              "difficulty should increase stable visual pacing")
+        }
+        for profile in profiles {
+            let range = profile.points.map(\.multiplier)
+            XCTAssertTrue(range.allSatisfy { $0 >= 0.70 && $0 <= 1.50 })
+        }
+    }
+
+    func testIntensitySettingChangesOnlyVisualProfile() {
+        let chart = makeChart(noteTimes: stride(from: 0.5, through: 23.5, by: 0.75).map { $0 })
+        let originalTimes = chart.notes.map(\.time)
+        let subtle = DynamicSpeedProfile.make(analysis: sectionAnalysis(), chart: chart,
+                                               enabled: true, intensity: .subtle)
+        let expressive = DynamicSpeedProfile.make(analysis: sectionAnalysis(), chart: chart,
+                                                  enabled: true, intensity: .expressive)
+        let subtleRange = (subtle.points.map(\.multiplier).max() ?? 0)
+            - (subtle.points.map(\.multiplier).min() ?? 0)
+        let expressiveRange = (expressive.points.map(\.multiplier).max() ?? 0)
+            - (expressive.points.map(\.multiplier).min() ?? 0)
+        XCTAssertGreaterThan(expressiveRange, subtleRange)
+        XCTAssertEqual(chart.notes.map(\.time), originalTimes,
+                       "profile construction does not rewrite chart timestamps")
+    }
+
+    func testVisualSpeedNeverChangesProjectionAtNoteTime() {
+        let chart = makeChart(noteTimes: stride(from: 0.5, through: 23.5, by: 0.75).map { $0 })
+        let slowProfile = DynamicSpeedProfile.make(analysis: sectionAnalysis(), chart: chart,
+                                                    enabled: true, intensity: .subtle)
+        let fastProfile = DynamicSpeedProfile.make(analysis: sectionAnalysis(), chart: chart,
+                                                    enabled: true, intensity: .expressive)
+        for note in chart.notes {
+            XCTAssertEqual(slowProfile.progress(noteTime: note.time, currentTime: note.time, baseLead: 1.8),
+                           0, accuracy: 0.000_001)
+            XCTAssertEqual(fastProfile.progress(noteTime: note.time, currentTime: note.time, baseLead: 1.8),
+                           0, accuracy: 0.000_001)
+        }
+    }
 }

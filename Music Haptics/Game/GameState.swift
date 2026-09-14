@@ -69,4 +69,10 @@ struct GameSession: Identifiable, Sendable {
     /// Non-nil when this is a practice session. The chart is untouched;
     /// practice adds a speed/section/loop configuration on top of it.
     var practice: PracticeConfig?
+    /// Optional pre-game speed advice from Foundation Models. It is validated
+    /// before use and is never consulted by scoring or the frame loop.
+    var enhancedSpeedPoints: [DynamicSpeedProfile.SpeedCurvePoint]? = nil
+    /// The complete validated pre-game plan, retained for diagnostics and
+    /// product surfaces. The real-time engine consumes only `points`.
+    var enhancedGameplayPlan: PreparedGameplayPlan? = nil
 }

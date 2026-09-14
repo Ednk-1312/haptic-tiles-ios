@@ -136,23 +136,34 @@ enum SpatialCatch {
                          touchY: Double, leadTime: Double, hitLineY: Double,
                          topY: Double, tileHeightFraction: Double,
                          holdTailTime: Double? = nil) -> Double {
+        guard leadTime.isFinite, leadTime > 0 else { return .infinity }
+        let headProgress = (noteTime - touchTime) / leadTime
+        let tailProgress = holdTailTime.map { ($0 - touchTime) / leadTime }
+        return distance(headProgress: headProgress, tailProgress: tailProgress,
+                        touchY: touchY, hitLineY: hitLineY, topY: topY,
+                        tileHeightFraction: tileHeightFraction)
+    }
+
+    /// Distance overload for the absolute-time visual speed curve. The engine
+    /// supplies already-integrated progress values, so input uses the exact
+    /// same monotonic projection as the renderer even when visual speed is
+    /// changing through a section.
+    static func distance(headProgress: Double, tailProgress: Double?,
+                         touchY: Double, hitLineY: Double,
+                         topY: Double, tileHeightFraction: Double) -> Double {
+        guard headProgress.isFinite, touchY.isFinite,
+              tileHeightFraction.isFinite, tileHeightFraction > 0 else { return .infinity }
         let travel = max(0.0001, hitLineY - topY)
-        // Screen fractions of the tile's bottom (head) and top (tail) at the
-        // touch instant — the same projection the renderer uses.
-        let headY = hitLineY - ((noteTime - touchTime) / leadTime) * travel
-        let tailY = holdTailTime.map { hitLineY - ((min($0, noteTime + leadTime) - touchTime) / leadTime) * travel }
-        // For taps: the tile is one tile-height tall; measure to its center.
-        // For holds: measure to the NEAREST EDGE of the whole visible span,
-        // so pressing anywhere on the long body registers (Magic Tiles 3
-        // behavior), while a touch just above the tail still catches.
-        if let tailY {
+        let headY = hitLineY - headProgress * travel
+        if let tailProgress, tailProgress.isFinite {
+            let tailY = hitLineY - tailProgress * travel
             let nearest = min(abs(touchY - headY), abs(touchY - tailY))
-            let inside = (touchY <= headY && touchY >= tailY) || (touchY >= headY && touchY <= tailY)
+            let inside = (touchY <= headY && touchY >= tailY)
+                || (touchY >= headY && touchY <= tailY)
             return inside ? 0 : nearest / tileHeightFraction
-        } else {
-            let noteCenterY = headY - tileHeightFraction / 2
-            return abs(touchY - noteCenterY) / tileHeightFraction
         }
+        let noteCenterY = headY - tileHeightFraction / 2
+        return abs(touchY - noteCenterY) / tileHeightFraction
     }
 }
 
@@ -258,5 +269,390 @@ enum NoteMovement {
         let factor = pow(relativeTempo, -tempoExponent)
         let excess = min(dynamicExcessFraction, max(-dynamicExcessFraction, factor - 1))
         return baseLead * (1 + excess)
+    }
+}
+
+/// User-selectable amount of section-aware visual speed variation.
+/// The setting changes presentation only; the chart/audio timeline and scoring
+/// remain unchanged.
+enum DynamicSpeedIntensity: String, Codable, CaseIterable, Identifiable, Sendable {
+    case subtle
+    case standard
+    case expressive
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .subtle: return "Subtle"
+        case .standard: return "Standard"
+        case .expressive: return "Expressive"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .subtle: return "Small changes that keep the field calm"
+        case .standard: return "Musical changes that follow sections and intensity"
+        case .expressive: return "A stronger contrast between relaxed and intense sections"
+        }
+    }
+
+    /// Maximum section-derived variation around the difficulty's stable speed.
+    /// These are intentionally bounded; the song never controls scoring timing.
+    var variation: Double {
+        switch self {
+        case .subtle: return 0.06
+        case .standard: return 0.12
+        case .expressive: return 0.18
+        }
+    }
+}
+
+/// Deterministic, pre-game chart analysis used by every device. It converts
+/// note density, chord density, and optional section energy/labels into a
+/// smoothed normalized intensity curve. No audio or network work is done
+/// here, and the result is sampled—not regenerated—during gameplay.
+enum StandardMathIntensityAnalyzer {
+    struct Point: Sendable, Equatable {
+        let time: Double
+        let intensity: Double
+    }
+
+    /// Produces broad section-sized samples rather than reacting to individual
+    /// notes. This keeps isolated chart noise from creating visible speed
+    /// oscillation while still following real intro/build/drop/breakdown
+    /// structure when the chart contains it.
+    static func make(chart: Chart, analysis: AudioAnalysis?, duration: Double) -> [Point] {
+        let safeDuration = max(1, duration.isFinite ? duration : chart.duration)
+        let bucketCount = min(24, max(4, Int((safeDuration / 4.0).rounded())))
+        let bucketLength = safeDuration / Double(bucketCount)
+        var noteCounts = Array(repeating: 0, count: bucketCount)
+
+        // One linear pass handles taps and chords equally. A chord contributes
+        // its simultaneous voices to density, which is a meaningful visual
+        // intensity signal without changing chart timing or scoring.
+        for note in chart.notes where note.time.isFinite && note.time >= 0 && note.time <= safeDuration {
+            let bucket = min(bucketCount - 1, max(0, Int(note.time / bucketLength)))
+            noteCounts[bucket] += 1
+        }
+
+        let densities = noteCounts.map { Double($0) / max(bucketLength, 0.001) }
+        let meanDensity = densities.reduce(0, +) / Double(bucketCount)
+        let sortedDensities = densities.sorted()
+        let medianDensity = sortedDensities[bucketCount / 2]
+        let densityReference = max(0.25, (meanDensity + medianDensity) * 0.5)
+
+        let hasUsefulDensity = chart.notes.count >= 8 && meanDensity >= 0.25
+        var raw = Array(repeating: 0.0, count: bucketCount)
+        for bucket in 0..<bucketCount {
+            let densitySignal = hasUsefulDensity
+                ? clamp(densities[bucket] / densityReference - 1, -1, 1)
+                : 0
+            let midpoint = (Double(bucket) + 0.5) * bucketLength
+            let section = analysis?.sections.first {
+                $0.start.isFinite && $0.end.isFinite
+                    && midpoint >= $0.start && midpoint < $0.end
+            }
+            let energySignal = section.map { clamp($0.energy * 2 - 1, -1, 1) } ?? 0
+            let labelSignal = section.map(labelSignal(for:)) ?? 0
+            // Density is primary because it is directly observable in the
+            // playable chart. Energy/labels add musical context when present.
+            raw[bucket] = clamp(densitySignal * 0.58
+                                + energySignal * 0.27
+                                + labelSignal * 0.15, -1, 1)
+        }
+
+        // Two-pass three-sample smoothing gives gradual acceleration and
+        // deceleration while preserving a genuine dense chorus or quiet bridge.
+        let once = smooth(raw)
+        let twice = smooth(once)
+        return twice.enumerated().map { index, value in
+            Point(time: Double(index) * bucketLength,
+                  intensity: clamp(value, -1, 1))
+        }
+    }
+
+    private static func smooth(_ values: [Double]) -> [Double] {
+        guard values.count > 1 else { return values }
+        return values.indices.map { index in
+            let previous = values[max(0, index - 1)]
+            let current = values[index]
+            let next = values[min(values.count - 1, index + 1)]
+            return previous * 0.25 + current * 0.5 + next * 0.25
+        }
+    }
+
+    private static func labelSignal(for section: SongSection) -> Double {
+        switch section.label {
+        case .intro: return -0.55
+        case .verse: return -0.12
+        case .chorus: return 0.62
+        case .bridge: return 0.02
+        case .breakdown: return -0.50
+        case .outro: return -0.38
+        case .generic: return 0
+        }
+    }
+
+    private static func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+        min(upper, max(lower, value.isFinite ? value : 0))
+    }
+}
+
+/// Absolute-time visual speed profile for one gameplay session.
+///
+/// The old renderer divided `(noteTime - currentTime)` by a newly sampled
+/// lead-time on every frame. When the local lead changed, an already-visible
+/// tile could jump because its denominator changed even though the audio clock
+/// only moved forward. This profile fixes that at the model boundary:
+///
+/// - speed targets are prepared once before gameplay;
+/// - targets are linearly interpolated between absolute song times;
+/// - note position is the integral of that positive speed curve from the
+///   note's deterministic spawn time to the current audio time;
+/// - the same projection is used by rendering and spatial touch matching.
+///
+/// A frame-rate change can therefore change sampling cadence, but it cannot
+/// change the song timeline or make a note move backward.
+struct DynamicSpeedProfile: Sendable, Equatable {
+    struct Point: Sendable, Equatable {
+        let time: Double
+        let multiplier: Double
+    }
+
+    enum Source: String, Sendable, Equatable {
+        case deterministicChartAndSections
+        case deterministicFallback
+        case enhancedOnDeviceAI
+    }
+
+    /// Structured, bounded output from either the deterministic analyzer or
+    /// Apple's optional pre-game on-device analysis. Values are normalized
+    /// signals, not per-frame commands; the real-time engine only consumes
+    /// the prepared profile below.
+    struct SpeedCurvePoint: Codable, Sendable, Equatable {
+        let time: Double
+        let intensity: Double
+
+        init(time: Double, intensity: Double) {
+            self.time = time
+            self.intensity = intensity
+        }
+    }
+
+    let duration: Double
+    let points: [Point]
+    let source: Source
+    let enabled: Bool
+    let intensity: DynamicSpeedIntensity
+    let difficultyMultiplier: Double
+    private let cumulativeDistances: [Double]
+    private let minimumMultiplier: Double
+
+    init(duration: Double, points: [Point], source: Source, enabled: Bool,
+         intensity: DynamicSpeedIntensity, difficultyMultiplier: Double) {
+        self.duration = duration
+        self.points = points
+        self.source = source
+        self.enabled = enabled
+        self.intensity = intensity
+        self.difficultyMultiplier = difficultyMultiplier
+        var distances = Array(repeating: 0.0, count: points.count)
+        if points.count > 1 {
+            for index in 1..<points.count {
+                let previous = points[index - 1]
+                let current = points[index]
+                let width = max(0, current.time - previous.time)
+                distances[index] = distances[index - 1]
+                    + (previous.multiplier + current.multiplier) * 0.5 * width
+            }
+        }
+        self.cumulativeDistances = distances
+        self.minimumMultiplier = points.map(\.multiplier).min()
+            ?? max(difficultyMultiplier, 0.01)
+    }
+
+    /// Builds a profile before the session begins. No work from this method is
+    /// required by the per-frame renderer.
+    static func make(analysis: AudioAnalysis?, chart: Chart,
+                     enabled: Bool,
+                     intensity: DynamicSpeedIntensity,
+                     reduceMotion: Bool = false,
+                     enhancedPoints: [SpeedCurvePoint]? = nil) -> DynamicSpeedProfile {
+        let duration = max(1, max(analysis?.duration ?? chart.duration, chart.lastNoteTime + 1))
+        let effectiveIntensity = intensity
+        // Reduce Motion keeps the chart/audio timeline and scoring identical,
+        // but removes section-driven visual speed variation for a calm,
+        // predictable presentation.
+        let variation = enabled && !reduceMotion
+            ? effectiveIntensity.variation * chart.difficulty.dynamicSpeedResponse
+            : 0
+        let base = chart.difficulty.visualSpeedMultiplier
+
+        // Dynamic Speed OFF (and Reduce Motion) intentionally bypasses all
+        // chart analysis. The same absolute-time projection remains active,
+        // but the profile is constant and no dynamic work is needed.
+        if variation == 0 {
+            return DynamicSpeedProfile(duration: duration,
+                                       points: [Point(time: 0, multiplier: base),
+                                                Point(time: duration, multiplier: base)],
+                                       source: .deterministicFallback,
+                                       enabled: enabled,
+                                       intensity: effectiveIntensity,
+                                       difficultyMultiplier: base)
+        }
+
+        var targets: [(time: Double, signal: Double)] = []
+        var profileSource: Source = .deterministicFallback
+        if let enhancedPoints {
+            // Foundation Models output is advisory structure only. Validate,
+            // sort, clamp, and deduplicate before it can affect presentation.
+            let valid = enhancedPoints.filter {
+                $0.time.isFinite && $0.intensity.isFinite
+                    && $0.time >= 0 && $0.time <= duration
+            }.sorted { $0.time < $1.time }
+            if valid.count <= 24 {
+                for point in valid {
+                    let time = max(0, min(duration, point.time))
+                    let signal = clamp(point.intensity, -1, 1)
+                    if let last = targets.last, abs(last.time - time) < 0.0001 {
+                        targets[targets.count - 1] = (time, signal)
+                    } else {
+                        targets.append((time, signal))
+                    }
+                }
+            }
+            if targets.count >= 2 {
+                profileSource = .enhancedOnDeviceAI
+            } else {
+                targets.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if targets.isEmpty {
+            // The Standard Math Engine is the universal path. It uses chart
+            // density/chords plus section energy/labels and two-pass smoothing
+            // to produce broad musical changes rather than a linear ramp.
+            targets = StandardMathIntensityAnalyzer.make(chart: chart,
+                                                          analysis: analysis,
+                                                          duration: duration)
+                .map { ($0.time, $0.intensity) }
+            profileSource = analysis?.sections.isEmpty == false
+                ? .deterministicChartAndSections
+                : .deterministicFallback
+        }
+
+        var points: [Point] = []
+        let allowedRange = chart.difficulty.dynamicSpeedRange
+        for target in targets.sorted(by: { $0.time < $1.time }) {
+            let multiplier = clamp(base * (1 + target.signal * variation),
+                                   allowedRange.lowerBound, allowedRange.upperBound)
+            if let last = points.last, abs(last.time - target.time) < 0.0001 {
+                points[points.count - 1] = Point(time: target.time, multiplier: multiplier)
+            } else {
+                points.append(Point(time: target.time, multiplier: multiplier))
+            }
+        }
+        if points.isEmpty || points[0].time > 0 {
+            let first = points.first?.multiplier ?? base
+            points.insert(Point(time: 0, multiplier: first), at: 0)
+        }
+        if points.last?.time ?? 0 < duration {
+            points.append(Point(time: duration, multiplier: points.last?.multiplier ?? base))
+        }
+
+        return DynamicSpeedProfile(duration: duration, points: points,
+                                   source: profileSource,
+                                   enabled: enabled, intensity: effectiveIntensity,
+                                   difficultyMultiplier: base)
+    }
+
+    /// Stable speed multiplier at an absolute song time.
+    func multiplier(at time: Double) -> Double {
+        guard let first = points.first else { return difficultyMultiplier }
+        guard points.count > 1 else { return first.multiplier }
+        if time <= first.time { return first.multiplier }
+        guard let last = points.last else { return first.multiplier }
+        if time >= last.time { return last.multiplier }
+        var low = 0
+        var high = points.count - 1
+        while low + 1 < high {
+            let middle = (low + high) / 2
+            if points[middle].time <= time { low = middle } else { high = middle }
+        }
+        let a = points[low]
+        let b = points[high]
+        let fraction = (time - a.time) / max(b.time - a.time, 0.0001)
+        return a.multiplier + (b.multiplier - a.multiplier) * fraction
+    }
+
+    /// Effective lead at a time, retained as a compatibility/readability API.
+    /// Projection itself uses `progress(noteTime:currentTime:baseLead:)` below.
+    func leadTime(at time: Double, baseLead: Double) -> Double {
+        baseLead / max(multiplier(at: time), 0.01)
+    }
+
+    /// Absolute-time note projection. 1 = spawn point, 0 = hit line, negative
+    /// = passed the hit line. This is monotonic as `currentTime` increases.
+    func progress(noteTime: Double, currentTime: Double, baseLead: Double) -> Double {
+        guard noteTime.isFinite, currentTime.isFinite, baseLead.isFinite, baseLead > 0 else {
+            return 0
+        }
+        let travelTime = baseLead / max(multiplier(at: noteTime), 0.01)
+        let spawnTime = noteTime - travelTime
+        let totalDistance = integral(from: spawnTime, to: noteTime)
+        guard totalDistance > 0, totalDistance.isFinite else { return 0 }
+        return integral(from: currentTime, to: noteTime) / totalDistance
+    }
+
+    /// Largest possible visual lead for range queries in the renderer.
+    func maximumLeadTime(baseLead: Double) -> Double {
+        baseLead / max(minimumMultiplier, 0.01)
+    }
+
+    // MARK: - Piecewise-linear integration
+
+    /// Integrates the positive speed curve in O(log n) using the precomputed
+    /// prefix areas. The old implementation walked every profile segment for
+    /// every visible tile on every frame, which made a dense chart needlessly
+    /// compete with the display refresh.
+    private func integral(from start: Double, to end: Double) -> Double {
+        guard start.isFinite, end.isFinite, start != end else { return 0 }
+        return area(to: end) - area(to: start)
+    }
+
+    /// Signed area from the first profile point to `time`.
+    private func area(to time: Double) -> Double {
+        guard let first = points.first else { return 0 }
+        if time <= first.time {
+            return (time - first.time) * first.multiplier
+        }
+        guard let last = points.last else { return 0 }
+        if time >= last.time {
+            return (cumulativeDistances.last ?? 0)
+                + (time - last.time) * last.multiplier
+        }
+
+        var low = 0
+        var high = points.count - 1
+        while low + 1 < high {
+            let middle = (low + high) / 2
+            if points[middle].time <= time { low = middle } else { high = middle }
+        }
+        let a = points[low]
+        let b = points[high]
+        let width = max(b.time - a.time, 0.0001)
+        let fraction = (time - a.time) / width
+        let speedAtTime = a.multiplier + (b.multiplier - a.multiplier) * fraction
+        return (cumulativeDistances[low] + (a.multiplier + speedAtTime) * 0.5 * (time - a.time))
+    }
+
+    private static func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+        min(upper, max(lower, value.isFinite ? value : 0))
+    }
+
+    private func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+        Self.clamp(value, lower, upper)
     }
 }
