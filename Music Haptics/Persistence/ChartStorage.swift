@@ -9,9 +9,9 @@ import Foundation
 /// path (`songID.chart.json`) is still read as a fallback for records created
 /// before multi-difficulty storage.
 enum ChartStorage {
-    /// v5: onset-first placement (tiles land on audible hits, not grid
-    /// estimates) — forces regeneration of all cached charts.
-    static let chartVersion = 5
+    /// v6: hold durations use local beat intervals so fast song sections produce
+    /// shorter musical sustains; forces regeneration of cached charts.
+    static let chartVersion = 6
 
     /// Difficulty levels that get a generated chart (Normal = .medium;
     /// Casual is not a menu level; Extreme is generated but labeled

@@ -50,7 +50,7 @@ enum ChartGenerationError: LocalizedError {
 /// per-cell selection runs unchanged as the fallback, so every supported song
 /// still charts deterministically.
 final class ChartGenerator {
-    static let currentVersion = 5
+    static let currentVersion = 6
 
     /// Developer/stats switch: force the pre-v4 per-cell selection path even
     /// when a beat grid exists. Used by the ChartStats tool to measure

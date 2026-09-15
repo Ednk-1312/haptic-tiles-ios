@@ -60,6 +60,9 @@ final class SettingsStore: ObservableObject {
 
     // On-device AI (optional system Foundation Models tier; never required for play)
     @Published var onDeviceAIEnabled: Bool { didSet { save() } }
+    /// Enables the capability-gated tempo analyzer during pre-game analysis.
+    /// Unsupported devices automatically use the DSP analyzer.
+    @Published var enhancedTempoAnalysisEnabled: Bool { didSet { save() } }
     // Existing bundled Core ML chart-generation controls (developer-configurable)
     @Published var aiEnabled: Bool { didSet { save() } }
     @Published var aiDifficultyWeight: Double { didSet { save() } }      // 0…1, 0.3 = deterministic dominant
@@ -146,6 +149,7 @@ final class SettingsStore: ObservableObject {
         autoDifficulty = d.object(forKey: Keys.autoDifficulty) as? Bool ?? true
         experimentalAIMode = d.object(forKey: Keys.aiMode) as? Bool ?? false
         onDeviceAIEnabled = d.object(forKey: Keys.onDeviceAIEnabled) as? Bool ?? false
+        enhancedTempoAnalysisEnabled = d.object(forKey: Keys.enhancedTempoAnalysisEnabled) as? Bool ?? true
         let defaultConfig = AIFusionConfig.default
         aiEnabled = d.object(forKey: Keys.aiEnabled) as? Bool ?? defaultConfig.enabled
         aiDifficultyWeight = Self.clamp(d.object(forKey: Keys.aiDifficultyWeight) as? Double ?? defaultConfig.difficultyAIWeight,
@@ -220,6 +224,7 @@ final class SettingsStore: ObservableObject {
         static let autoDifficulty = "settings.autoDifficulty"
         static let aiMode = "settings.experimentalAI"
         static let onDeviceAIEnabled = "settings.onDeviceAIEnabled"
+        static let enhancedTempoAnalysisEnabled = "settings.enhancedTempoAnalysisEnabled"
         static let aiEnabled = "settings.aiEnabled"
         static let aiDifficultyWeight = "settings.aiDifficultyWeight"
         static let aiEventWeight = "settings.aiEventWeight"
@@ -262,6 +267,7 @@ final class SettingsStore: ObservableObject {
         d.set(autoDifficulty, forKey: Keys.autoDifficulty)
         d.set(experimentalAIMode, forKey: Keys.aiMode)
         d.set(onDeviceAIEnabled, forKey: Keys.onDeviceAIEnabled)
+        d.set(enhancedTempoAnalysisEnabled, forKey: Keys.enhancedTempoAnalysisEnabled)
         d.set(aiEnabled, forKey: Keys.aiEnabled)
         d.set(aiDifficultyWeight, forKey: Keys.aiDifficultyWeight)
         d.set(aiEventWeight, forKey: Keys.aiEventWeight)

@@ -1,8 +1,8 @@
 # Haptic Tiles / Music Haptics — Project Progress
 
 **App:** Haptic Piano (bundle `com.eshannandakumarpersonalteam.MusicHaptics`)
-**Current version:** 1.1 (14) · **584 automated tests, all passing**
-**Last updated:** September 13, 2026
+**Current version:** 1.1 (14) · **599 automated tests, all passing**
+**Last updated:** September 14, 2026
 
 ---
 
@@ -50,7 +50,7 @@ A complete, testable four-lane rhythm game that plays YOUR music:
   lane-balance pressure so all four lanes stay used), a gated hold-note pass,
   a playability validator with repair, and a quality scorer that picks the best
   of three seeded candidates. Four fallback tiers guarantee every playable song
-  gets a playable chart. Charts are versioned (currently v5); cached charts
+  gets a playable chart. Charts are versioned (currently v6); cached charts
   regenerate automatically when the version changes.
 - **Gameplay engine** (`Game/`): audio-clock-driven (AVAudioPlayer device-time
   anchored, never wall-clock drift), 60 Hz main-loop tick with generation guards
@@ -80,7 +80,7 @@ A complete, testable four-lane rhythm game that plays YOUR music:
   score/combo announcements (throttled), Reduce Motion honored everywhere,
   reduced haptics, bounded Dynamic Type in gameplay, and reduced visual speed
   variation without changing the authoritative gameplay timeline.
-- **Quality gates**: 584 XCTests covering pure math (geometry, timing curves,
+- **Quality gates**: 599 XCTests covering pure math (geometry, timing curves,
   tempo models, absolute projections), the full input pipeline (stress: rapid
   taps, chords, cancels, pause-during-hold), hold synchronization and measured
   partial progress, chart generation determinism/lane balance/sync, the
@@ -95,7 +95,8 @@ A complete, testable four-lane rhythm game that plays YOUR music:
 Music Haptics/
 ├── App/            HapticPianoApp (entry), AppState (preparation boundary,
 │                   queue, results), PipelineStatus (durable op state)
-├── Analysis/       AudioAnalyzer, OnsetDetector, BeatTracker (DSP)
+├── Analysis/       AudioAnalyzer, TempoAnalysis (capability-gated tempo tiers),
+│                   OnsetDetector, BeatTracker (DSP)
 ├── Audio/          AudioPlayer (device-time anchor), AudioMetadata, AudioSource
 ├── AI/             AIFeatures, AISystem, AIInference (optional advisor port)
 ├── Chart/          ChartGenerator (4 tiers), ChartPatterns (phrase templates),
@@ -239,6 +240,31 @@ judgment classification.
   analysis runs only after results/settings while idle and is cancelled before
   the next session.
 
+### Intelligent Tempo Analysis (September 14, 2026)
+
+- Added a capability-gated tempo boundary (`TempoAnalyzer`) above the existing
+  `TempoEstimator`. Every device retains the Standard DSP/math path; the new
+  path consumes only the compact spectral-flux envelope produced during
+  preprocessing and never runs in the gameplay loop.
+- The enhanced path is eligible only when iOS reports Foundation Models as
+  available, Core ML is present, and a validated bundled `AITempo` model exists.
+  Capability selection is based on live framework/model availability, not an
+  iPhone marketing name. Because this checkout does not currently ship a
+  validated `AITempo.mlmodel`, production analysis honestly remains DSP-backed;
+  the Core ML adapter is model-ready but does not invent inference.
+- Tempo results now carry BPM, confidence, stability, half/double-time
+  ambiguity, tempo-change detection, analyzer/version, measured analysis and
+  inference durations, fallback reason, and cache-hit state. Low-confidence,
+  missing, invalid, or ambiguous enhanced output returns the stable DSP result.
+- The deterministic cache fingerprints source URL, sample rate, duration,
+  compact flux content, analyzer kind, and analyzer version. Version/model
+  changes invalidate entries; cache and fallback state are visible in Debug
+  diagnostics and the Settings toggle is disabled when the enhanced tier is
+  unavailable.
+- One stable tempo result is handed to the existing beat tracker/chart/Dynamic
+  Speed boundary. No frame-to-frame BPM updates, scoring changes, note-timestamp
+  changes, network calls, audio uploads, or gameplay timing changes were added.
+
 ### Confirmed hold and rendering fixes
 
 - Hold head, body, tail, active fill, spatial catch, and release now use the same
@@ -272,7 +298,7 @@ judgment classification.
 - Focused iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **37 tests, 0
   failures** across `GameplayIntelligenceTests`, `DynamicSpeedTests`, and
   `HoldDurationTests`.
-- Full iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **584 tests, 0 failures**
+- Full iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **599 tests, 0 failures**
   in 73.736 seconds. Build/test output contained no compiler warning/error
   diagnostics. The only tool warning was Xcode's benign AppIntents metadata
   notice for the test target, which has no AppIntents dependency.
@@ -299,7 +325,8 @@ judgment classification.
 | 1.1 | 11 | Magic Tiles 3 sync (onset-first charting v5), dynamic speed, touch/hold fixes |
 | 1.1 | 11 | Geometry/stutter/flash fix, safe-area HUD, proportional holds |
 | 1.1 | 14 | Two-tier gameplay intelligence, bounded Foundation Models planning,
-  integrated hold projection, and production gameplay rendering cleanup |
+  integrated hold projection, production gameplay rendering cleanup, and
+  capability-gated Intelligent Tempo Analysis |
 
 Deliverable pipeline: `xcodebuild archive` → signed IPA on the Desktop
 (`Haptic Piano …ipa`) → `devicectl device install app` to a connected iPhone.

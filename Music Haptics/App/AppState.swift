@@ -328,7 +328,9 @@ final class AppState {
                     return
                 }
                 self.publishPipeline(.active(.analyzing, progress: 0.12, message: "Listening to the song"), for: songID)
-                let analysis = try await AudioAnalyzer().analyze(url: url)
+                let analysis = try await AudioAnalyzer(
+                    intelligentTempoEnabled: self.settings.enhancedTempoAnalysisEnabled
+                ).analyze(url: url)
                 // A superseded run must not write ANY files: saving its
                 // analysis would clobber the newer run's file, and deleting
                 // charts would destroy charts the newer run already generated.

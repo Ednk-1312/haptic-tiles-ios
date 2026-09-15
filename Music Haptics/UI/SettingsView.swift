@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var aiAvailability: OnDeviceAIAvailability = .checking
     @State private var showAISetup = false
+    @State private var tempoCapabilities = TempoAnalyzerDeviceCapabilities.current()
 
     var body: some View {
         NavigationStack {
@@ -182,8 +183,15 @@ struct SettingsView: View {
                               step: 0.1,
                               display: "\(Int(settings.chartDensityMultiplier * 100))%")
                     Toggle("Auto difficulty", isOn: $settings.autoDifficulty)
-                    Text("Charts are generated on this device from the song's beat, onset, tempo, and section analysis. Changing density affects newly generated charts.")
+                    Toggle("Enhanced Tempo Analysis", isOn: $settings.enhancedTempoAnalysisEnabled)
+                        .disabled(!tempoCapabilities.supportsIntelligentTempoAnalysis)
+                    Text(tempoCapabilities.supportsIntelligentTempoAnalysis
+                         ? "Uses the capability-gated enhanced on-device tempo path during preprocessing. Results stay local, are confidence-checked, cached, and feed the existing stable Dynamic Speed input."
+                         : "Enhanced Tempo Analysis is unavailable on this device right now. Haptic Tiles will use the Standard DSP tempo analyzer; gameplay remains fully supported offline.")
                         .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("This applies when a song is analyzed or re-analyzed; it never runs during gameplay.")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
 
@@ -236,6 +244,7 @@ struct SettingsView: View {
             }
             .task {
                 aiAvailability = await appState.gameplayIntelligence.refresh()
+                tempoCapabilities = TempoAnalyzerDeviceCapabilities.current()
             }
             .sheet(isPresented: $showAISetup) {
                 OnDeviceAISetupView {

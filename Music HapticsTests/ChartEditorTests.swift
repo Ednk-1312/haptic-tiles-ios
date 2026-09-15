@@ -233,7 +233,7 @@ final class ChartEditorTests: XCTestCase {
         var editor = ChartEditor(chart: makeChart(), songDuration: 30)
         _ = editor.addNote(time: 5, lane: 1)
         let edited = editor.makeEditedChart()
-        XCTAssertEqual(edited.chartVersion, 5)            // bumped from 4
+        XCTAssertEqual(edited.chartVersion, 5)            // fixture baseline is v4
         XCTAssertEqual(edited.notes.count, 1)
         XCTAssertEqual(edited.validationWarnings, editor.validation.hardFailures + editor.validation.warnings)
         // The original chart object is untouched.

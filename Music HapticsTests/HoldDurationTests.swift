@@ -96,6 +96,13 @@ final class HoldDurationTests: XCTestCase {
         let progress = engine.holdProgress(lane: 1) ?? -1
         XCTAssertEqual(progress, 0.1 / 1.4, accuracy: 0.01,
                        "a body catch starts the remaining physical sustain at the touch-down time")
+
+        let visualAtPress = engine.holdVisualProgress(lane: 1, at: 3.6) ?? -1
+        let visualAfterPress = engine.holdVisualProgress(lane: 1, at: 3.7) ?? -1
+        XCTAssertEqual(visualAtPress, 0, accuracy: 0.001,
+                       "the hold animation starts at the body press")
+        XCTAssertGreaterThan(visualAfterPress, visualAtPress,
+                             "the hold animation must advance before the head reaches the bottom line")
     }
 
     func testHeadPressProgressUsesFullMusicalSpan() {

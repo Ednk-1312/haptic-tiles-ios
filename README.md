@@ -629,6 +629,18 @@ seeded-noisy and note-dropping players and checks score/combo/accuracy math
 against an independent recomputation, full-song judgment coverage, calibration
 participation and results-record integrity.
 
+## Intelligent Tempo Analysis
+
+Tempo estimation has a capability-gated, two-tier preprocessing pipeline. Every device retains the existing Accelerate/vDSP DSP estimator as the reliable baseline; no tempo analysis runs during active gameplay.
+
+- **Standard Math / DSP fallback:** `TempoEstimator` analyzes the compact spectral-flux envelope with autocorrelation, harmonic support, octave disambiguation, confidence, and windowed stability checks. This path works offline on every supported device.
+- **Enhanced on-device tier:** `TempoAnalyzerDeviceCapabilities` checks the OS-reported Foundation Models availability, Core ML support, and the presence of a validated bundled `AITempo` model. It does not infer eligibility from an iPhone model name and it never treats Foundation Models availability alone as proof that a tempo model exists.
+- **Model boundary:** `IntelligentTempoAnalyzer` receives compact flux features only, ranks half/normal/double-time candidates, and rejects missing, ambiguous, low-confidence, or invalid predictions. When a validated model is not bundled or fails, it returns the DSP result with an explicit fallback reason. The current repository does not claim a live AITempo model is bundled; production analysis therefore remains the DSP path until one is validated and added.
+- **Stable integration:** one validated BPM, confidence, stability, and tempo-change result is passed to the existing beat tracker and chart generator. Dynamic Speed consumes that prepared result; it is never re-estimated frame by frame, and scoring timestamps/audio timing are unchanged.
+- **Local cache:** cache keys include the source URL, sample rate, duration, compact signal fingerprint, analyzer kind, and analyzer version. Version mismatches and analyzer changes invalidate entries. Cache hits/misses and optional inference duration are surfaced in Debug diagnostics.
+- **Privacy/performance:** processing is local with AVFoundation + Accelerate + optional Core ML only; no audio, identity, or telemetry is uploaded. Analysis runs before play, uses bounded feature arrays, and exposes measured wall/inference duration rather than unverified battery or Neural Engine claims.
+- **Settings:** Settings → Enhanced Tempo Analysis enables the capability-gated path when it is genuinely available; unsupported devices show that the DSP fallback remains active and fully playable offline.
+
 ## On-device AI (Version 1)
 
 Two small **real** Core ML models run on-device (no network, no server):

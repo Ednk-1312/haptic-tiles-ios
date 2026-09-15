@@ -66,6 +66,17 @@ struct DiagnosticsView: View {
                     row("Sample rate", String(format: "%.0f Hz", analysis.sampleRate))
                     row("BPM", analysis.tempoBPM.map { String(format: "%.1f", $0) } ?? "not detected")
                     row("BPM confidence", analysis.tempoConfidence.map { String(format: "%.2f", $0) } ?? "—")
+                    row("Tempo analyzer", analysis.tempoAnalyzer.displayName)
+                    row("Tempo stability", String(format: "%.2f", analysis.tempoStability))
+                    row("Half/double ambiguity", String(format: "%.2f", analysis.tempoHalfDoubleAmbiguity))
+                    row("Tempo changes", analysis.tempoChangeDetected ? "detected" : "not detected")
+                    row("Tempo cache", analysis.tempoAnalysisCacheHit ? "hit" : "miss")
+                    if let inference = analysis.tempoInferenceDuration {
+                        row("Tempo inference", String(format: "%.2f ms", inference))
+                    }
+                    if let fallback = analysis.tempoFallbackReason {
+                        Text(fallback).font(.caption).foregroundStyle(.secondary)
+                    }
                     row("Detected beats", "\(analysis.beats.count)")
                     row("Detected onsets", "\(analysis.onsets.count)")
                     row("Candidate events", "\(analysis.events.count)")

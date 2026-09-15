@@ -17,9 +17,9 @@ final class ChartSyncTests: XCTestCase {
     }
 
     func testGeneratorVersionBumpedForOnsetFirstPlacement() {
-        XCTAssertEqual(ChartStorage.chartVersion, 5)
-        XCTAssertEqual(ChartGenerator.currentVersion, 5,
-                       "generator stamp and storage gate must move together")
+        XCTAssertEqual(ChartStorage.chartVersion, ChartGenerator.currentVersion)
+        XCTAssertEqual(ChartGenerator.currentVersion, 6,
+                       "generator and storage stamps must move together")
     }
 
     /// End-to-end: a steady metronome's tiles must sit within a 16th of the

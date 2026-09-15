@@ -68,6 +68,15 @@ enum AnalysisError: LocalizedError {
 final class AudioAnalyzer {
     private let fftSize = 2048
     private let hopSize = 512
+    private let tempoAnalyzer: any TempoAnalyzer
+
+    /// The analyzer is injectable for boundary tests and diagnostics. Production
+    /// selection is capability-based and happens once before the analysis run.
+    init(tempoAnalyzer: (any TempoAnalyzer)? = nil,
+         intelligentTempoEnabled: Bool = true) {
+        self.tempoAnalyzer = tempoAnalyzer
+            ?? TempoAnalyzerFactory.make(enabled: intelligentTempoEnabled)
+    }
 
     func analyze(url: URL) async throws -> AudioAnalysis {
         let started = Date()
@@ -261,7 +270,32 @@ final class AudioAnalyzer {
         // stages, not only during decoding — a cancelled analysis must never
         // run these to completion.
         try Task.checkCancellation()
-        let tempo = TempoEstimator.estimate(flux: flux, hopTime: hopTime)
+        let tempoKey = TempoAnalysisCache.key(url: url, sampleRate: sampleRate,
+                                              duration: duration, flux: flux,
+                                              analyzerKind: tempoAnalyzer.kind)
+        let cachedTempo = await Task.detached(priority: .utility) {
+            TempoAnalysisCache.load(key: tempoKey)
+        }.value
+        let tempoResult: TempoAnalysisResult
+        if let cachedTempo {
+            tempoResult = cachedTempo
+            #if DEBUG
+            print(String(format: "[Tempo] cache hit analyzer=%@ bpm=%.1f", cachedTempo.analyzer.rawValue, cachedTempo.bpm))
+            #endif
+        } else {
+            let analyzed = try await tempoAnalyzer.analyze(
+                TempoAnalysisInput(flux: flux, hopTime: hopTime))
+            try Task.checkCancellation()
+            tempoResult = analyzed
+            let toCache = analyzed
+            Task.detached(priority: .utility) {
+                TempoAnalysisCache.save(toCache, key: tempoKey)
+            }
+            #if DEBUG
+            print(String(format: "[Tempo] analyzer=%@ bpm=%.1f confidence=%.2f stability=%.2f", analyzed.analyzer.rawValue, analyzed.bpm, analyzed.confidence, analyzed.stability))
+            #endif
+        }
+        let tempo = TempoEstimate(bpm: tempoResult.bpm, confidence: tempoResult.confidence)
         try Task.checkCancellation()
         let track = BeatTracker.track(flux: flux, hopTime: hopTime, bpm: tempo.bpm, confidence: tempo.confidence)
         try Task.checkCancellation()
@@ -297,6 +331,14 @@ final class AudioAnalyzer {
                              sampleRate: sampleRate,
                              tempoBPM: tempo.bpm > 0 ? tempo.bpm : nil,
                              tempoConfidence: tempo.confidence,
+                             tempoAnalyzer: tempoResult.analyzer,
+                             tempoStability: tempoResult.stability,
+                             tempoHalfDoubleAmbiguity: tempoResult.halfDoubleAmbiguity,
+                             tempoChangeDetected: tempoResult.tempoChangeDetected,
+                             tempoAnalysisVersion: tempoResult.analyzerVersion,
+                             tempoAnalysisCacheHit: tempoResult.cacheHit,
+                             tempoInferenceDuration: tempoResult.inferenceDuration,
+                             tempoFallbackReason: tempoResult.fallbackReason,
                              beats: track.beats,
                              onsets: onsets,
                              events: events,

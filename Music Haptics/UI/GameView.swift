@@ -179,7 +179,6 @@ struct GameSessionView: View {
                 // gray veil under the Dynamic Island and eliminates one full-
                 // screen compositing layer from every frame.
                 VStack(spacing: 0) {
-                    topProgress
                     hud
                     Spacer()
                     if engine.isPractice {
@@ -515,28 +514,6 @@ struct GameSessionView: View {
     /// compositing layer. Contrast now comes from `centerScoreBlock` itself.
     private var hudScrim: some View {
         EmptyView()
-    }
-
-    /// Thin full-width song-progress bar in the safe-area HUD. It intentionally
-    /// contains no edge-positioned symbols, so nothing can be clipped beneath
-    /// the Dynamic Island or mistaken for a second gameplay control.
-    private var topProgress: some View {
-        GeometryReader { geo in
-            // Coarse published progress (updates ~4×/song), not the raw
-            // 60 Hz clock — reading engine.currentTime here would make the
-            // HUD an every-frame view-tree invalidation source.
-            let fraction = engine.displayProgress
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.18))
-                Capsule()
-                    .fill(LinearGradient(colors: [.cyan.opacity(0.9), .blue.opacity(0.9)],
-                                         startPoint: .leading, endPoint: .trailing))
-                    .frame(width: geo.size.width * fraction)
-            }
-        }
-        .frame(height: 4)
-        .padding(.horizontal, 22)
-        .padding(.top, 8)
     }
 
     // MARK: - Practice bar

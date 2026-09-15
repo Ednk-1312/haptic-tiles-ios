@@ -31,7 +31,12 @@ struct HoldTracker: Sendable {
         let index: Int
         let noteID: Int
         let lane: Int
+        /// Musical sustain start used for scoring/progress.
         let startTime: Double
+        /// Physical/visual press time. A body press may precede the chart head;
+        /// keeping this separate lets the animation respond immediately without
+        /// extending the scored hold duration.
+        let pressTime: Double
         let endTime: Double
     }
 
@@ -60,10 +65,13 @@ struct HoldTracker: Sendable {
     /// activate or replace a second hold further ahead in the same lane.
     @discardableResult
     mutating func start(lane: Int, index: Int, noteID: Int,
-                        startTime: Double, endTime: Double) -> Active? {
+                        startTime: Double, endTime: Double,
+                        pressTime: Double? = nil) -> Active? {
         guard endTime > startTime, active[lane] == nil else { return nil }
         let hold = Active(index: index, noteID: noteID, lane: lane,
-                          startTime: startTime, endTime: endTime)
+                          startTime: startTime,
+                          pressTime: pressTime ?? startTime,
+                          endTime: endTime)
         active[lane] = hold
         stateByNote[noteID] = .active
         progressByNote.removeValue(forKey: noteID)
@@ -127,6 +135,10 @@ struct HoldTracker: Sendable {
         active.values.first { $0.noteID == noteID }
     }
 
+    func pressTime(lane: Int) -> Double? {
+        active[lane]?.pressTime
+    }
+
     /// 0…1 fraction of the active hold consumed at `time`.
     func progress(lane: Int, at time: Double) -> Double? {
         guard let hold = active[lane] else { return nil }
@@ -138,6 +150,12 @@ struct HoldTracker: Sendable {
         let span = hold.endTime - hold.startTime
         guard span > 0 else { return 1 }
         return min(1, max(0, (time - hold.startTime) / span))
+    }
+
+    func visualProgress(of hold: Active, at time: Double) -> Double {
+        let span = hold.endTime - hold.pressTime
+        guard span > 0 else { return 1 }
+        return min(1, max(0, (time - hold.pressTime) / span))
     }
 
     func recordedProgress(noteID: Int) -> Double? {

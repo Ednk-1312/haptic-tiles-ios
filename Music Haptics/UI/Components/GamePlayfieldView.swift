@@ -468,10 +468,12 @@ struct GamePlayfieldView: View {
         // authoritative musical-time fraction in the engine; this visual
         // fraction is what makes a slow → fast → slow hold look continuous
         // instead of advancing at a static speed.
-        let holdStart = engine.holdStartTime(lane: note.lane) ?? note.time
-        let holdEnd = note.time + note.duration
-        let visualFraction = min(1, max(0, engine.holdRelativeVisualProgress(
-            startTime: holdStart, endTime: holdEnd, at: time)))
+        // The visual fill begins at the physical press, including a body press
+        // made before the chart head reaches the bottom line. The scored hold
+        // interval still begins at the chart head, so this changes only the
+        // feedback animation—not note timing, release tolerance, or bonus math.
+        let visualFraction = min(1, max(0, engine.holdVisualProgress(
+            lane: note.lane, at: time) ?? 0))
         let fillMaxY = rect.maxY
         let fillMinY = max(rect.minY, fillMaxY - rect.height * CGFloat(visualFraction))
         let fillHeight = max(0, fillMaxY - fillMinY)

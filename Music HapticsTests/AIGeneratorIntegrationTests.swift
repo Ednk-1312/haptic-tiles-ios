@@ -44,7 +44,6 @@ final class AIGeneratorIntegrationTests: XCTestCase {
     func testNoAdvisorMatchesVersionedDeterministicBaseline() async throws {
         let analysis = SignalFixtures.drumHeavy(bpm: 120, seconds: 30)
         let plain = try await generate(analysis: analysis, advisor: nil)
-        XCTAssertEqual(plain.chart.chartVersion, 5)
         XCTAssertEqual(plain.chart.chartVersion, ChartStorage.chartVersion)
         XCTAssertNil(plain.chart.aiDifficultyScore)
         XCTAssertNil(plain.chart.aiModelVersion)

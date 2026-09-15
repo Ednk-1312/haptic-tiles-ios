@@ -946,7 +946,8 @@ final class GameEngine: ObservableObject {
         let sustainStartTime = max(hit.note.time, pressTime)
         guard sustainStartTime < endTime else { return }
         guard holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
-                          startTime: sustainStartTime, endTime: endTime) != nil else { return }
+                          startTime: sustainStartTime, endTime: endTime,
+                          pressTime: pressTime) != nil else { return }
         holdLaneLocks.insert(hit.note.lane)
         if let pattern = HapticPatternGenerator.holdStartPattern(profile: hapticProfile,
                                                                  enabled: settings.hapticsEnabled,
@@ -1008,6 +1009,39 @@ final class GameEngine: ObservableObject {
             sustainTime = holdTimelineTime(for: player.currentTime)
         }
         return holds.progress(lane: lane, at: sustainTime)
+    }
+
+    /// Visual fill progress follows the musical hold interval and the prepared
+    /// Dynamic Speed profile. The chart head/tail remain authoritative: Dynamic
+    /// Speed changes how the fill travels through that interval, but never
+    /// changes the time at which the hold may complete.
+    ///
+    /// A player may press the visible body before its head reaches the line. In
+    /// that case a small activation preview (4%) begins immediately, then the
+    /// fill transitions continuously into the musical head→tail path. Anchoring
+    /// the whole fill to `pressTime` made an early body press stretch the visual
+    /// animation across an interval longer than the actual hold, which is why
+    /// fast passages could feel artificially slow.
+    func holdVisualProgress(lane: Int, at time: Double) -> Double? {
+        guard let hold = holds.activeHold(lane: lane) else { return nil }
+
+        let previewFraction = 0.04
+        let hadEarlyBodyPress = hold.pressTime < hold.startTime
+        let musicalFraction = speedProfile.relativeProgress(from: hold.startTime,
+                                                            to: hold.endTime,
+                                                            at: time)
+        guard hadEarlyBodyPress else { return musicalFraction }
+
+        if time < hold.startTime {
+            let preHeadSpan = hold.startTime - hold.pressTime
+            guard preHeadSpan > 0 else { return musicalFraction }
+            let previewProgress = min(1, max(0, (time - hold.pressTime) / preHeadSpan))
+            return previewFraction * previewProgress
+        }
+
+        // Preserve continuity at the head: the preview's 4% becomes the
+        // starting point for the remaining 96% of the integrated path.
+        return previewFraction + (1 - previewFraction) * musicalFraction
     }
 
     /// Spatial progress through an active hold's musical interval. This is

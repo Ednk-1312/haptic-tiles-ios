@@ -62,9 +62,16 @@ enum HoldGenerator {
             // Tail must land inside the playable span.
             guard result[i].time + 2.0 * beatInterval <= playEnd + 0.2 else { continue }
 
-            // Duration: one beat, occasionally two. Clamped to stay readable.
+            // Duration follows the LOCAL beat interval at the hold head, not
+            // only the song-wide BPM. A tempo/energy build can therefore make
+            // holds shorter in the fast passage while a sparse section keeps
+            // its natural sustain. This is still a musical chart duration;
+            // Dynamic Speed never rewrites it during active gameplay.
+            let localBeat = localBeatInterval(at: result[i].time,
+                                               beats: analysis.beats,
+                                               fallback: beatInterval)
             let beats = rng.uniform() < 0.22 ? 2.0 : 1.0
-            let duration = min(max(beats * beatInterval, 0.4), 2.4)
+            let duration = min(max(beats * localBeat, 0.32), 2.4)
 
             // Own-lane occupancy: head + body + gap must clear the next note.
             let nextTime = result[nextSameLane[i]].time
@@ -77,5 +84,33 @@ enum HoldGenerator {
             result[i].duration = duration
         }
         return result
+    }
+
+    /// Returns the beat interval local to a note. Beat detection can contain
+    /// an occasional gap, so choose the nearest valid interval whose midpoint
+    /// is closest to the hold head and fall back to the global tempo when the
+    /// local evidence is not usable. This is pre-game chart construction only.
+    static func localBeatInterval(at time: Double, beats: [Beat], fallback: Double) -> Double {
+        let safeFallback = fallback.isFinite && fallback > 0 ? fallback : 0.5
+        let ordered = beats
+            .filter { $0.time.isFinite }
+            .sorted { $0.time < $1.time }
+        guard ordered.count >= 2, time.isFinite else { return safeFallback }
+
+        var best: (distance: Double, interval: Double)?
+        for pair in zip(ordered, ordered.dropFirst()) {
+            let interval = pair.1.time - pair.0.time
+            guard interval.isFinite, interval >= 0.20, interval <= 2.5 else { continue }
+            let midpoint = (pair.0.time + pair.1.time) * 0.5
+            let candidate = (abs(midpoint - time), interval)
+            if best == nil || candidate.0 < best!.distance {
+                best = candidate
+            }
+        }
+        return best?.interval ?? safeFallback
+    }
+
+    private static func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+        min(upper, max(lower, value.isFinite ? value : 0))
     }
 }

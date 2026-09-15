@@ -56,6 +56,39 @@ final class HoldNoteTests: XCTestCase {
         }
     }
 
+    func testLocalBeatIntervalFollowsFastAndSlowSections() {
+        let beats = [
+            Beat(time: 0.0, strength: 0.8, isStrong: true),
+            Beat(time: 0.5, strength: 0.6, isStrong: false),
+            Beat(time: 1.0, strength: 0.8, isStrong: true),
+            Beat(time: 1.5, strength: 0.6, isStrong: false),
+            Beat(time: 2.0, strength: 0.8, isStrong: true),
+            Beat(time: 2.75, strength: 0.6, isStrong: false),
+            Beat(time: 3.5, strength: 0.8, isStrong: true)
+        ]
+
+        XCTAssertEqual(HoldGenerator.localBeatInterval(at: 1.25, beats: beats, fallback: 0.5),
+                       0.5, accuracy: 0.000_001)
+        XCTAssertEqual(HoldGenerator.localBeatInterval(at: 3.0, beats: beats, fallback: 0.5),
+                       0.75, accuracy: 0.000_001)
+        XCTAssertEqual(HoldGenerator.localBeatInterval(at: 8.0, beats: [], fallback: 0.6),
+                       0.6, accuracy: 0.000_001)
+    }
+
+    func testGeneratedHoldDurationsStayWithinMusicalBoundsAtFastTempo() async throws {
+        let analysis = SignalFixtures.fastDrumHeavy(bpm: 220, seconds: 24)
+        let output = try await ChartGenerator().generate(
+            analysis: analysis, songID: UUID(),
+            request: .init(difficulty: .hard, densityMultiplier: 1.0, seed: 23))
+        let holds = output.chart.notes.filter { $0.type == .hold }
+        for hold in holds {
+            XCTAssertGreaterThanOrEqual(hold.duration, 0.32)
+            XCTAssertLessThanOrEqual(hold.duration, 2.4)
+            XCTAssertLessThanOrEqual(hold.duration, 2.0 * (60.0 / 220.0) + 0.001,
+                                     "fast-section holds should remain tied to a local musical beat")
+        }
+    }
+
     // MARK: - Validator
 
     func testValidatorRejectsNoteInsideHoldBody() {
