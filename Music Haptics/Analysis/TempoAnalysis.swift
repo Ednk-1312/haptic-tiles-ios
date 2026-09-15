@@ -34,6 +34,9 @@ struct TempoAnalysisInput: Sendable {
 /// cache metadata. No field is consulted by the frame loop or scoring engine.
 struct TempoAnalysisResult: Codable, Sendable, Equatable {
     static let analyzerVersion = 1
+    /// Version of the bundled candidate-ranking model. Included in cache keys
+    /// so replacing the model cannot reuse an older prediction.
+    static let bundledModelVersion = 1
 
     let bpm: Double
     let confidence: Double
@@ -42,6 +45,8 @@ struct TempoAnalysisResult: Codable, Sendable, Equatable {
     let tempoChangeDetected: Bool
     let analyzer: TempoAnalyzerKind
     let analyzerVersion: Int
+    /// Nil for the DSP path or when no model prediction was available.
+    let modelVersion: Int?
     let analysisDuration: Double
     let inferenceDuration: Double?
     let fallbackReason: String?
@@ -52,6 +57,7 @@ struct TempoAnalysisResult: Codable, Sendable, Equatable {
         TempoAnalysisResult(bpm: 0, confidence: 0, stability: 0,
                             halfDoubleAmbiguity: 0, tempoChangeDetected: false,
                             analyzer: kind, analyzerVersion: analyzerVersion,
+                            modelVersion: nil,
                             analysisDuration: 0, inferenceDuration: nil,
                             fallbackReason: reason, cacheHit: false)
     }
@@ -69,9 +75,8 @@ struct TempoAnalyzerDeviceCapabilities: Sendable, Equatable {
     let foundationModelsAvailable: Bool
     let coreMLAvailable: Bool
     /// A validated, app-bundled tempo model is a separate requirement from
-    /// Core ML framework support. The current app intentionally ships no
-    /// unvalidated tempo model, so the live app remains on DSP until one is
-    /// added and evaluated.
+    /// Core ML framework support. This flag is true only after the model is
+    /// present in the actual app bundle.
     let tempoModelAvailable: Bool
 
     init(foundationModelsAvailable: Bool,
@@ -140,6 +145,7 @@ struct DSPTempoAnalyzer: TempoAnalyzer {
             tempoChangeDetected: summary.tempoChangeDetected,
             analyzer: .dsp,
             analyzerVersion: TempoAnalysisResult.analyzerVersion,
+            modelVersion: nil,
             analysisDuration: Date().timeIntervalSince(started),
             inferenceDuration: nil,
             fallbackReason: nil,
@@ -161,10 +167,10 @@ struct TempoMLPrediction: Sendable, Equatable {
 }
 
 /// Enhanced path. It first computes the same reliable DSP baseline, then lets
-/// an optional validated model rank half/normal/double-time candidates. If the
-/// model is missing, fails, disagrees with the stable signal, or reports low
-/// confidence, the DSP result is returned unchanged except for an explicit
-/// fallback reason. This is never part of gameplay timing.
+/// the validated bundled model rank half/normal/double-time candidates. If the
+/// model fails, disagrees with the stable signal, or reports low confidence, the
+/// DSP result is returned unchanged except for an explicit fallback reason.
+/// This is never part of gameplay timing.
 struct IntelligentTempoAnalyzer: TempoAnalyzer {
     let kind: TempoAnalyzerKind = .intelligentHeuristic
     private let modelScorer: any TempoMLScorer
@@ -196,6 +202,7 @@ struct IntelligentTempoAnalyzer: TempoAnalyzer {
                 tempoChangeDetected: baseline.tempoChangeDetected,
                 analyzer: .intelligentHeuristic,
                 analyzerVersion: TempoAnalysisResult.analyzerVersion,
+                modelVersion: prediction == nil ? nil : TempoAnalysisResult.bundledModelVersion,
                 analysisDuration: baseline.analysisDuration,
                 inferenceDuration: prediction?.inferenceDuration,
                 fallbackReason: "Core ML tempo model unavailable or low confidence",
@@ -216,6 +223,7 @@ struct IntelligentTempoAnalyzer: TempoAnalyzer {
                 tempoChangeDetected: baseline.tempoChangeDetected,
                 analyzer: .intelligentCoreML,
                 analyzerVersion: TempoAnalysisResult.analyzerVersion,
+                modelVersion: TempoAnalysisResult.bundledModelVersion,
                 analysisDuration: baseline.analysisDuration,
                 inferenceDuration: prediction.inferenceDuration,
                 fallbackReason: "Core ML candidates were ambiguous",
@@ -233,6 +241,7 @@ struct IntelligentTempoAnalyzer: TempoAnalyzer {
             tempoChangeDetected: baseline.tempoChangeDetected,
             analyzer: .intelligentCoreML,
             analyzerVersion: TempoAnalysisResult.analyzerVersion,
+            modelVersion: TempoAnalysisResult.bundledModelVersion,
             analysisDuration: baseline.analysisDuration,
             inferenceDuration: prediction.inferenceDuration,
             fallbackReason: nil,
@@ -367,10 +376,10 @@ enum TempoAnalysisMath {
     }
 }
 
-/// A tiny Core ML adapter. The app intentionally ships without an unvalidated
-/// tempo model today; when `AITempo.mlmodel` is added, its contract is exactly
-/// 12 Float features in `features` and one scalar `prediction` per candidate.
-/// Missing/invalid models return nil and never affect playback.
+/// A tiny Core ML adapter for the validated bundled AITempo model. Its contract
+/// is exactly 12 Float-compatible features in `features` and one scalar
+/// `prediction` per candidate. Missing/invalid models return nil and never
+/// affect playback.
 actor CoreMLTempoScorer: TempoMLScorer {
     private let modelURL: URL?
     private var model: MLModel?
@@ -438,7 +447,8 @@ enum TempoAnalysisCache {
     static func key(url: URL, sampleRate: Double, duration: Double, flux: [Float],
                     analyzerKind: TempoAnalyzerKind = .dsp) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        let identity = "\(url.absoluteString)|\(sampleRate)|\(duration)|\(flux.count)|\(analyzerKind.rawValue)|v\(TempoAnalysisResult.analyzerVersion)"
+        let modelVersion = analyzerKind == .dsp ? 0 : TempoAnalysisResult.bundledModelVersion
+        let identity = "\(url.absoluteString)|\(sampleRate)|\(duration)|\(flux.count)|\(analyzerKind.rawValue)|v\(TempoAnalysisResult.analyzerVersion)|m\(modelVersion)"
         for byte in identity.utf8 { hash ^= UInt64(byte); hash &*= 0x0000_0100_0000_01B3 }
         for value in flux where value.isFinite {
             var bits = value.bitPattern
@@ -455,12 +465,29 @@ enum TempoAnalysisCache {
               let entry = try? JSONDecoder().decode(Entry.self, from: data),
               entry.version == TempoAnalysisResult.analyzerVersion,
               entry.key == key,
-              entry.result.analyzerVersion == TempoAnalysisResult.analyzerVersion else {
+              entry.result.analyzerVersion == TempoAnalysisResult.analyzerVersion,
+              Self.isCompatibleModelVersion(for: entry.result) else {
             return nil
         }
         var result = entry.result
         result.cacheHit = true
         return result
+    }
+
+    private static func isCompatibleModelVersion(for result: TempoAnalysisResult) -> Bool {
+        switch result.analyzer {
+        case .dsp:
+            return result.modelVersion == nil
+        case .intelligentHeuristic:
+            // The heuristic kind also represents an enhanced run that had to
+            // fall back: nil means the model was unavailable, while the
+            // bundled version means its output was rejected for confidence or
+            // ambiguity. Both are valid cached outcomes for this analyzer.
+            return result.modelVersion == nil
+                || result.modelVersion == TempoAnalysisResult.bundledModelVersion
+        case .intelligentCoreML:
+            return result.modelVersion == TempoAnalysisResult.bundledModelVersion
+        }
     }
 
     static func save(_ result: TempoAnalysisResult, key: String) {

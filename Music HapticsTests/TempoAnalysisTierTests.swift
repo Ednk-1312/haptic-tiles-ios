@@ -113,6 +113,7 @@ final class TempoAnalysisTierTests: XCTestCase {
                                          halfDoubleAmbiguity: 0.1, tempoChangeDetected: false,
                                          analyzer: .dsp,
                                          analyzerVersion: TempoAnalysisResult.analyzerVersion,
+                                         modelVersion: nil,
                                          analysisDuration: 0.4, inferenceDuration: nil,
                                          fallbackReason: nil, cacheHit: false)
         TempoAnalysisCache.save(result, key: dspKey)
@@ -130,6 +131,7 @@ final class TempoAnalysisTierTests: XCTestCase {
                                          halfDoubleAmbiguity: 0.2, tempoChangeDetected: false,
                                          analyzer: .dsp,
                                          analyzerVersion: TempoAnalysisResult.analyzerVersion,
+                                         modelVersion: nil,
                                          analysisDuration: 0.1, inferenceDuration: nil,
                                          fallbackReason: nil, cacheHit: false)
         let resultObject = try XCTUnwrap(
@@ -141,10 +143,49 @@ final class TempoAnalysisTierTests: XCTestCase {
         XCTAssertNil(TempoAnalysisCache.load(key: key))
     }
 
+    func testEnhancedFallbackCanBeCachedWithoutPretendingModelInferenceSucceeded() {
+        let key = TempoAnalysisCache.key(url: URL(fileURLWithPath: "/tmp/song-c.wav"),
+                                         sampleRate: 44_100, duration: 8,
+                                         flux: [0.1, 0.2], analyzerKind: .intelligentHeuristic)
+        let result = TempoAnalysisResult(bpm: 90, confidence: 0.8, stability: 0.7,
+                                         halfDoubleAmbiguity: 0.2, tempoChangeDetected: false,
+                                         analyzer: .intelligentHeuristic,
+                                         analyzerVersion: TempoAnalysisResult.analyzerVersion,
+                                         modelVersion: nil,
+                                         analysisDuration: 0.1, inferenceDuration: nil,
+                                         fallbackReason: "model unavailable", cacheHit: false)
+
+        TempoAnalysisCache.save(result, key: key)
+        let loaded = TempoAnalysisCache.load(key: key)
+        XCTAssertEqual(loaded?.analyzer, .intelligentHeuristic)
+        XCTAssertNil(loaded?.modelVersion)
+        XCTAssertEqual(loaded?.fallbackReason, "model unavailable")
+        XCTAssertTrue(loaded?.cacheHit == true)
+    }
+
     func testTempoNormalizationHandlesHalfAndDoubleTimeCandidates() {
         XCTAssertEqual(TempoAnalysisMath.normalizedBPM(60), 120, accuracy: 0.001)
         XCTAssertEqual(TempoAnalysisMath.normalizedBPM(240), 120, accuracy: 0.001)
         XCTAssertEqual(TempoAnalysisMath.normalizedBPM(128), 128, accuracy: 0.001)
         XCTAssertEqual(TempoAnalysisMath.normalizedBPM(.nan), 0)
+    }
+
+    func testBundledAITempoModelLoadsAndRanksCandidates() async throws {
+        // The model is an application resource. Loading the compiled resource
+        // from the host bundle verifies the exact artifact shipped to iOS,
+        // rather than merely checking that the source .mlmodel exists.
+        let url = try XCTUnwrap(
+            Bundle.main.url(forResource: "AITempo", withExtension: "mlmodelc"),
+            "AITempo.mlmodelc must be present in the built app bundle")
+        let scorer = CoreMLTempoScorer(modelURL: url)
+        let rawPrediction = await scorer.predict(features: [
+            Array(repeating: 0.1, count: 12),
+            Array(repeating: 0.5, count: 12),
+            Array(repeating: 0.9, count: 12)
+        ])
+        let prediction = try XCTUnwrap(rawPrediction)
+        XCTAssertEqual(prediction.scores.count, 3)
+        XCTAssertTrue(prediction.scores.allSatisfy(\.isFinite))
+        XCTAssertTrue(prediction.inferenceDuration >= 0)
     }
 }

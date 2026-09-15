@@ -247,11 +247,11 @@ judgment classification.
   path consumes only the compact spectral-flux envelope produced during
   preprocessing and never runs in the gameplay loop.
 - The enhanced path is eligible only when iOS reports Foundation Models as
-  available, Core ML is present, and a validated bundled `AITempo` model exists.
-  Capability selection is based on live framework/model availability, not an
-  iPhone marketing name. Because this checkout does not currently ship a
-  validated `AITempo.mlmodel`, production analysis honestly remains DSP-backed;
-  the Core ML adapter is model-ready but does not invent inference.
+  available, Core ML is present, and the validated bundled `AITempo` model is
+  present in the app bundle. Capability selection is based on live
+  framework/model availability, not an iPhone marketing name. The model is
+  compiled by Xcode into `AITempo.mlmodelc`; devices without Foundation Models
+  availability still use the DSP path.
 - Tempo results now carry BPM, confidence, stability, half/double-time
   ambiguity, tempo-change detection, analyzer/version, measured analysis and
   inference durations, fallback reason, and cache-hit state. Low-confidence,
@@ -261,9 +261,19 @@ judgment classification.
   changes invalidate entries; cache and fallback state are visible in Debug
   diagnostics and the Settings toggle is disabled when the enhanced tier is
   unavailable.
+- The bundled model was trained by `AI/Training/train_tempo.py` on 2,400
+  deterministic synthetic songs with a held-out song-disjoint validation split
+  (1.000 top-1 candidate accuracy vs 0.325 DSP baseline; MAE 0.05956, RMSE
+  0.15387). The model is 42 KB at source and the built `AITempo.mlmodelc` was
+  loaded and executed by the focused iOS 26 simulator regression test.
 - One stable tempo result is handed to the existing beat tracker/chart/Dynamic
   Speed boundary. No frame-to-frame BPM updates, scoring changes, note-timestamp
   changes, network calls, audio uploads, or gameplay timing changes were added.
+- A real `AITempo.mlmodel` is now committed with its deterministic training
+  script and manifest metrics. The iOS 26 device build succeeded and contains
+  `AITempo.mlmodelc`; installation was attempted on Eshan’s iPhone 17, but
+  CoreDevice reported the phone unavailable at validation time, so no physical
+  install is claimed for this model build.
 
 ### Confirmed hold and rendering fixes
 
@@ -298,10 +308,11 @@ judgment classification.
 - Focused iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **37 tests, 0
   failures** across `GameplayIntelligenceTests`, `DynamicSpeedTests`, and
   `HoldDurationTests`.
-- Full iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **599 tests, 0 failures**
-  in 73.736 seconds. Build/test output contained no compiler warning/error
-  diagnostics. The only tool warning was Xcode's benign AppIntents metadata
-  notice for the test target, which has no AppIntents dependency.
+- Full iOS Simulator 26.3.1 run on **iPhone 17 Pro**: **601 tests, 0 failures**
+  in the final validation run. Build/test output contained no compiler
+  warning/error diagnostics. The only tool warning was Xcode's benign
+  AppIntents metadata notice for the test target, which has no AppIntents
+  dependency.
 - The focused regression set covers model-output sanitization/fallback,
   availability-tier derivation, context capture for chords/holds/sections,
   absolute projection monotonicity/continuity/frame-cadence independence,
@@ -309,9 +320,12 @@ judgment classification.
   Dynamic Speed OFF, intensity range, and unchanged note timestamps.
 - The simulator exercised unavailable Foundation Models fallback behavior and
   the full deterministic path. Foundation Models `.available` inference was
-  not observed in this simulator run; no model download or successful live
-  Foundation Models response is claimed. Physical iPhone installation was not
-  part of this validation pass.
+  not observed in this simulator run; the bundled Core ML tempo artifact was
+  nevertheless loaded and executed directly by the regression test. No model
+  download or successful live Foundation Models response is claimed. The final
+  iOS 26 device build succeeded with the model included, but installation was
+  attempted while Eshan’s iPhone 17 was unavailable and therefore was not
+  completed.
 
 ---
 

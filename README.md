@@ -635,7 +635,7 @@ Tempo estimation has a capability-gated, two-tier preprocessing pipeline. Every 
 
 - **Standard Math / DSP fallback:** `TempoEstimator` analyzes the compact spectral-flux envelope with autocorrelation, harmonic support, octave disambiguation, confidence, and windowed stability checks. This path works offline on every supported device.
 - **Enhanced on-device tier:** `TempoAnalyzerDeviceCapabilities` checks the OS-reported Foundation Models availability, Core ML support, and the presence of a validated bundled `AITempo` model. It does not infer eligibility from an iPhone model name and it never treats Foundation Models availability alone as proof that a tempo model exists.
-- **Model boundary:** `IntelligentTempoAnalyzer` receives compact flux features only, ranks half/normal/double-time candidates, and rejects missing, ambiguous, low-confidence, or invalid predictions. When a validated model is not bundled or fails, it returns the DSP result with an explicit fallback reason. The current repository does not claim a live AITempo model is bundled; production analysis therefore remains the DSP path until one is validated and added.
+- **Model boundary:** `IntelligentTempoAnalyzer` receives compact flux features only, ranks half/normal/double-time candidates, and rejects missing, ambiguous, low-confidence, or invalid predictions. The validated `AITempo.mlmodel` is bundled and compiled into `AITempo.mlmodelc` by Xcode. If the model fails or confidence is insufficient, the analyzer returns the DSP result with an explicit fallback reason.
 - **Stable integration:** one validated BPM, confidence, stability, and tempo-change result is passed to the existing beat tracker and chart generator. Dynamic Speed consumes that prepared result; it is never re-estimated frame by frame, and scoring timestamps/audio timing are unchanged.
 - **Local cache:** cache keys include the source URL, sample rate, duration, compact signal fingerprint, analyzer kind, and analyzer version. Version mismatches and analyzer changes invalidate entries. Cache hits/misses and optional inference duration are surfaced in Debug diagnostics.
 - **Privacy/performance:** processing is local with AVFoundation + Accelerate + optional Core ML only; no audio, identity, or telemetry is uploaded. Analysis runs before play, uses bounded feature arrays, and exposes measured wall/inference duration rather than unverified battery or Neural Engine claims.
@@ -643,7 +643,7 @@ Tempo estimation has a capability-gated, two-tier preprocessing pipeline. Every 
 
 ## On-device AI (Version 1)
 
-Two small **real** Core ML models run on-device (no network, no server):
+Three small **real** Core ML models run on-device (no network, no server):
 
 - `AIDifficulty.mlmodel` (96 KB) — 16 normalized chart/music features →
   predicted difficulty 0–10. Held-out evaluation: MAE 0.027, RMSE 0.037,
@@ -652,12 +652,19 @@ Two small **real** Core ML models run on-device (no network, no server):
   importance 0–1 for chart-selection value. Held-out evaluation: AUC 0.94,
   precision 0.76 / recall 0.93 at 0.5, 85 % agreement with the deterministic
   chart's own selection.
+- `AITempo.mlmodel` (42 KB) — 12 normalized onset-envelope features rank
+  half-time, normal-time, and double-time BPM candidates. Held-out,
+  song-disjoint validation on 2,400 deterministic synthetic songs produced
+  1.000 top-1 candidate accuracy versus the 0.325 DSP candidate baseline
+  (MAE 0.05956, RMSE 0.15387). This model is an analysis aid, not a gameplay
+  controller; the stable DSP result remains the fallback.
 
-Both are `GradientBoostingRegressor` tree ensembles converted from a
-reproducible Python training pipeline (`AI/Training/train.py`) and compiled
-into the app bundle by Xcode (`coremlc`), so they run in the simulator and on
-any iPhone — Core ML, not Core AI: these are tiny numeric regressors that run
-everywhere, whereas Core AI (iOS 26+, Apple-Intelligence-gated) adds nothing
+All three are `GradientBoostingRegressor` tree ensembles converted from
+reproducible Python training pipelines (`AI/Training/train.py` and
+`AI/Training/train_tempo.py`) and compiled into the app bundle by Xcode
+(`coremlc`), so they run in the simulator and on any iPhone — Core ML, not
+Core AI: these are tiny numeric regressors that run everywhere, whereas Core
+AI (iOS 26+, Apple-Intelligence-gated) adds nothing
 for this workload.
 
 ### Event ranking (candidate selection)
@@ -682,11 +689,11 @@ final importance, selected vs rejected, confidence, used-AI flag, the batch
 inference time, aggregate fallback count and average confidence — plus JSONL
 export for training data.
 
-**Framework choice — Core ML, not Core AI.** Documented rationale: Core AI
-targets Apple-Intelligence-grade features and specific hardware; the models are
-16-float-in/1-float-out regressors that execute in ~0.04 ms on every supported
-iPhone and in the simulator. Core ML's `compileModel` also lets the unit tests
-load the exact shipped model on macOS.
+**Framework choice — Core ML, not Core AI.** The tempo model is a compact
+12-float-in/1-float-out candidate ranker. Xcode compiles the source model into
+`AITempo.mlmodelc`; the regression test loads that exact built bundle artifact
+and executes inference. The app measures inference duration at runtime rather
+than claiming an unmeasured latency, battery, or Neural Engine figure.
 
 **How the AI is used (intelligence, not control).** The AI is an advisory port
 (`AIChartAdvisor`) into the deterministic pipeline: it re-ranks candidate

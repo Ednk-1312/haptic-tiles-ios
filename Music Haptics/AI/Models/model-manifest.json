@@ -25,5 +25,19 @@
       "agreement": 0.8162,
       "note": "held-out song-disjoint validation vs deterministic selection"
     }
+  },
+  "tempoAnalysis": {
+    "modelVersion": 1,
+    "featureSchemaVersion": 1,
+    "featureCount": 12,
+    "trainingDataVersion": "tempo-synth-v1-2026-09-14",
+    "trainingRecordCount": 6120,
+    "evaluation": {
+      "mae": 0.05956,
+      "rmse": 0.15387,
+      "top1Accuracy": 1.0,
+      "baselineTop1Accuracy": 0.325,
+      "note": "held-out song-disjoint validation on deterministic synthetic onset envelopes"
+    }
   }
 }
