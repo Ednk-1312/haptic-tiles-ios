@@ -186,8 +186,13 @@ struct GameSessionView: View {
                         practiceBar
                     }
                 }
-                .padding(.top, proxy.safeAreaInsets.top)
-                .padding(.bottom, proxy.safeAreaInsets.bottom)
+                // Keep the gameplay field edge-to-edge, but always place the
+                // interactive HUD inside the system safe area. This prevents
+                // the Dynamic Island from covering Pause, score, or progress
+                // controls on physical iPhones while preserving all four full-
+                // width lanes underneath.
+                .padding(.top, max(0, proxy.safeAreaInsets.top))
+                .padding(.bottom, max(0, proxy.safeAreaInsets.bottom))
                 .frame(width: proxy.size.width, height: proxy.size.height,
                        alignment: .top)
             }
@@ -512,9 +517,9 @@ struct GameSessionView: View {
         EmptyView()
     }
 
-    /// Thin full-width song-progress bar at the very top of the screen
-    /// (reference-style HUD) with quarter-checkpoint stars that light up gold
-    /// as the run passes them.
+    /// Thin full-width song-progress bar in the safe-area HUD. It intentionally
+    /// contains no edge-positioned symbols, so nothing can be clipped beneath
+    /// the Dynamic Island or mistaken for a second gameplay control.
     private var topProgress: some View {
         GeometryReader { geo in
             // Coarse published progress (updates ~4×/song), not the raw
@@ -527,19 +532,11 @@ struct GameSessionView: View {
                     .fill(LinearGradient(colors: [.cyan.opacity(0.9), .blue.opacity(0.9)],
                                          startPoint: .leading, endPoint: .trailing))
                     .frame(width: geo.size.width * fraction)
-                ForEach([0.25, 0.5, 0.75, 1.0], id: \.self) { f in
-                    let reached = fraction >= f
-                    Image(systemName: reached ? "star.fill" : "star")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(reached ? .yellow : .white.opacity(0.35))
-                        .shadow(color: .black.opacity(0.6), radius: 1)
-                        .position(x: geo.size.width * f, y: geo.size.height / 2)
-                }
             }
         }
-        .frame(height: 14)
-        .padding(.horizontal, 18)
-        .padding(.top, 6)
+        .frame(height: 4)
+        .padding(.horizontal, 22)
+        .padding(.top, 8)
     }
 
     // MARK: - Practice bar

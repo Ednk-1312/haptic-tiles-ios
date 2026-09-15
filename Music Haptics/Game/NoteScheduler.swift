@@ -77,6 +77,23 @@ final class NoteScheduler {
         return (best.index, notes[best.index], best.offset)
     }
 
+    /// Every unjudged note in a lane within the window, ordered by chart time.
+    /// Spatial input uses the complete candidate set and chooses the tile closest
+    /// to the finger's actual position. Choosing only the temporally-nearest
+    /// note could activate a second hold in front of the hold the player was
+    /// touching when two same-lane tiles overlapped visually.
+    func candidates(in lane: Int, to time: Double, window: Double) -> [(index: Int, note: ChartNote, offset: Double)] {
+        var result: [(index: Int, note: ChartNote, offset: Double)] = []
+        var i = lowerBound(of: time - window)
+        while i < notes.count && notes[i].time <= time + window {
+            if isActive(i), notes[i].lane == lane, states[i].judgment == nil {
+                result.append((i, notes[i], notes[i].time - time))
+            }
+            i += 1
+        }
+        return result
+    }
+
     /// Nearest unjudged note per lane within the window (spatial catch uses
     /// this to judge each lane's own candidate against its own tile position
     /// instead of a global time-first winner). Returns up to four entries,

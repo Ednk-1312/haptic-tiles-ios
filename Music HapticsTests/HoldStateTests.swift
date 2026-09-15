@@ -86,9 +86,11 @@ final class HoldStateTests: XCTestCase {
     func testOneActiveHoldPerLane() {
         var tracker = HoldTracker()
         tracker.start(lane: 0, index: 0, noteID: 1, startTime: 1.0, endTime: 3.0)
-        tracker.start(lane: 0, index: 2, noteID: 2, startTime: 2.0, endTime: 4.0)
-        XCTAssertEqual(tracker.active.count, 1, "a later head in the same lane replaces the earlier hold")
-        XCTAssertEqual(tracker.active[0]?.noteID, 2)
+        let second = tracker.start(lane: 0, index: 2, noteID: 2, startTime: 2.0, endTime: 4.0)
+        XCTAssertNil(second, "a second hold in the same lane cannot steal the sustaining finger")
+        XCTAssertEqual(tracker.active.count, 1)
+        XCTAssertEqual(tracker.active[0]?.noteID, 1)
+        XCTAssertEqual(tracker.state(for: 2), .notStarted)
     }
 
     @MainActor

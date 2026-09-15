@@ -31,6 +31,9 @@ final class LatencyCompensationTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // Calibration is app-persistent, but each timing contract starts from
+        // a neutral offset so tests remain order-independent.
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
         player = MutableClockPlayer()
         chart = Self.makeChart()
         engine = GameEngine(audioURL: URL(fileURLWithPath: "/tmp/latency-stub.wav"),
@@ -40,9 +43,10 @@ final class LatencyCompensationTests: XCTestCase {
     }
 
     override func tearDown() {
-        engine.cleanup()
+        engine?.cleanup()
         engine = nil
         player = nil
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
         super.tearDown()
     }
 

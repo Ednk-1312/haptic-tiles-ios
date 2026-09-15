@@ -281,6 +281,35 @@ final class DynamicSpeedTests: XCTestCase {
                               "before the tail's own spawn time, the tail remains offscreen; its musical endpoint is not a fixed visual distance")
     }
 
+    func testHoldVisualFillUsesIntegratedSpeedPath() {
+        let profile = DynamicSpeedProfile(
+            duration: 12,
+            points: [
+                .init(time: 0, multiplier: 0.75),
+                .init(time: 3, multiplier: 1.40),
+                .init(time: 6, multiplier: 0.70),
+                .init(time: 9, multiplier: 1.25),
+                .init(time: 12, multiplier: 0.80)
+            ],
+            source: .deterministicChartAndSections,
+            enabled: true,
+            intensity: .expressive,
+            difficultyMultiplier: 1
+        )
+
+        let values = stride(from: 2.0, through: 10.0, by: 0.01).map {
+            profile.relativeProgress(from: 2.0, to: 10.0, at: $0)
+        }
+        for pair in zip(values, values.dropFirst()) {
+            XCTAssertLessThanOrEqual(pair.0, pair.1 + 0.000_001,
+                                      "integrated hold fill must never move backward")
+        }
+        XCTAssertEqual(profile.relativeProgress(from: 2.0, to: 10.0, at: 2.0),
+                       0, accuracy: 0.000_001)
+        XCTAssertEqual(profile.relativeProgress(from: 2.0, to: 10.0, at: 10.0),
+                       1, accuracy: 0.000_001)
+    }
+
     // MARK: - Standard Math intensity and settings contract
 
 

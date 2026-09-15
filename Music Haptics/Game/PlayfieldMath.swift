@@ -606,6 +606,21 @@ struct DynamicSpeedProfile: Sendable, Equatable {
         return integral(from: currentTime, to: noteTime) / totalDistance
     }
 
+    /// Spatial progress of a timestamp inside a hold interval. Unlike a
+    /// standalone note projection, this uses one shared integrated distance
+    /// across the complete hold, so speed changes inside the hold change the
+    /// fill position continuously without changing the hold's musical timing.
+    /// 0 = hold head time, 1 = hold tail time.
+    func relativeProgress(from startTime: Double, to endTime: Double,
+                          at currentTime: Double) -> Double {
+        guard startTime.isFinite, endTime.isFinite, currentTime.isFinite,
+              endTime > startTime else { return 0 }
+        let totalDistance = integral(from: startTime, to: endTime)
+        guard totalDistance.isFinite, totalDistance > 0 else { return 0 }
+        let clampedTime = min(endTime, max(startTime, currentTime))
+        return min(1, max(0, integral(from: startTime, to: clampedTime) / totalDistance))
+    }
+
     /// Largest possible visual lead for range queries in the renderer.
     func maximumLeadTime(baseLead: Double) -> Double {
         baseLead / max(minimumMultiplier, 0.01)

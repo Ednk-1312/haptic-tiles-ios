@@ -14,6 +14,11 @@ final class LaneTouchLayer: UIView {
     /// Touch (touch, button) identity → lane. UITouch objects are stable for
     /// the lifetime of a contact, so this is the canonical finger mapping.
     private var lanesByTouch = [UITouch: Int]()
+    /// One contact owns a lane at a time. UIKit can deliver two touches in the
+    /// same column; forwarding both as lane-only callbacks would let the
+    /// second touch-up release the first finger's hold. Ignoring a second
+    /// contact in that lane preserves deterministic hold ownership.
+    private var touchByLane = [Int: UITouch]()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -45,7 +50,9 @@ final class LaneTouchLayer: UIView {
         for touch in touches {
             let location = touch.location(in: self)
             guard let lane = laneIndex(at: location) else { continue }
+            guard touchByLane[lane] == nil else { continue }
             lanesByTouch[touch] = lane
+            touchByLane[lane] = touch
             onLaneDown?(lane, normalized(location))
         }
     }
@@ -62,6 +69,7 @@ final class LaneTouchLayer: UIView {
             // Leaving the actual playfield still cancels the contact.
             guard bounds.contains(location) else {
                 lanesByTouch.removeValue(forKey: touch)
+                if touchByLane[lane] === touch { touchByLane.removeValue(forKey: lane) }
                 onLaneUp?(lane)
                 continue
             }
@@ -73,6 +81,7 @@ final class LaneTouchLayer: UIView {
         super.touchesEnded(touches, with: event)
         for touch in touches {
             guard let lane = lanesByTouch.removeValue(forKey: touch) else { continue }
+            if touchByLane[lane] === touch { touchByLane.removeValue(forKey: lane) }
             onLaneUp?(lane)
         }
     }
@@ -81,6 +90,7 @@ final class LaneTouchLayer: UIView {
         super.touchesCancelled(touches, with: event)
         for touch in touches {
             guard let lane = lanesByTouch.removeValue(forKey: touch) else { continue }
+            if touchByLane[lane] === touch { touchByLane.removeValue(forKey: lane) }
             onLaneUp?(lane)
         }
     }

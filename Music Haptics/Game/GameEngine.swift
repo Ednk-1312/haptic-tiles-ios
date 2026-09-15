@@ -127,6 +127,10 @@ final class GameEngine: ObservableObject {
     private var holds = HoldTracker()
     /// Lanes the player's fingers are physically down on.
     private var touchesDown = Set<Int>()
+    /// Lanes whose current physical contact has already claimed a hold. The
+    /// lock lasts until touch-up even after the tail completes, so a sustained
+    /// finger cannot immediately activate the next hold in the same lane.
+    private var holdLaneLocks = Set<Int>()
     /// Last time a note haptic fired (chord voices don't stack feedback).
     private var lastNoteHapticAt: Double = -1
 
@@ -460,6 +464,7 @@ final class GameEngine: ObservableObject {
         recentTapBiasCount = 0
         holds.cancelAll()
         touchesDown = []
+        holdLaneLocks = []
 
         player.volume = Float(settings.volume)
         haptics.cooldownMs = hapticProfile.minIntervalMs
@@ -664,6 +669,7 @@ final class GameEngine: ObservableObject {
         autoplayCursor = 0
         holds.cancelAll()
         touchesDown = []
+        holdLaneLocks = []
         practiceStats = PracticeStats()
         // Rebuild the haptic schedule from the new position — stale patterns
         // from the previous section can never leak into this one.
@@ -720,6 +726,11 @@ final class GameEngine: ObservableObject {
     /// Without it (autoplay, accessibility), pure time-first matching applies.
     func handleTap(lane: Int, point: CGPoint = SpatialCatch.unspecifiedTouch) {
         guard state == .playing else { return }
+        // A lane already being sustained belongs to that finger until its
+        // musical tail (or release). A second touch/move in the same lane must
+        // not steal the lane and judge the next hold in front of it.
+        guard !holds.isActive(lane: lane) else { return }
+        guard !holdLaneLocks.contains(lane) else { return }
         touchesDown.insert(lane)
         let audioTime = player.currentTime
         let hit = judgeTap(lane: lane, at: audioTime, point: point)
@@ -737,6 +748,10 @@ final class GameEngine: ObservableObject {
     /// note is judged too — sliding across tiles behaves like tapping them.
     func handleLaneMove(lane: Int, point: CGPoint) {
         guard state == .playing else { return }
+        // Once a finger has started a hold, movement is sustain input, not a
+        // stream of additional taps. Without this guard a visible hold further
+        // ahead in the same lane could be spatially judged by the same finger.
+        guard !holds.isActive(lane: lane), !holdLaneLocks.contains(lane) else { return }
         let time = player.currentTime
         // Movement events are spatial-only: sliding a finger should catch a
         // visible tile, but it must not accidentally judge a note merely
@@ -757,16 +772,28 @@ final class GameEngine: ObservableObject {
     /// `outputLatency` late on the raw audio clock.
     func handleTouchUp(lane: Int) {
         touchesDown.remove(lane)
+        holdLaneLocks.remove(lane)
         guard state == .playing else { return }
-        let releaseTime = judgedTime(for: player.currentTime)
+        let rawReleaseTime = player.currentTime
+        // Hold sustain is an interval on the song clock, not a tap judgment.
+        // Use output-latency projection only; applying the tap calibration
+        // offset here can make a calibrated hold require extra physical time
+        // after its tail (or finish early) even though the chart is unchanged.
+        let releaseTime = holdTimelineTime(for: rawReleaseTime)
         guard let result = holds.release(lane: lane, at: releaseTime) else { return }
+        #if DEBUG
+        print(String(format: "[HoldTiming] release raw=%.3fs timeline=%.3fs tail=%.3fs delta=%+.0fms grace=%.0fms completed=%@ progress=%.0f%%",
+                     rawReleaseTime, releaseTime, result.hold.endTime,
+                     (releaseTime - result.hold.endTime) * 1000, 60.0,
+                     result.completed ? "yes" : "no", result.progress * 100))
+        #endif
         if result.completed {
-            completeHold(hold: result.hold, at: player.currentTime)
+            completeHold(hold: result.hold, at: releaseTime)
         } else {
             // `release` has already removed the active hold. Pass its measured
             // fraction through explicitly; querying the tracker now would
             // incorrectly report zero and make every early release look empty.
-            bankPartialHold(hold: result.hold, progress: result.progress, at: player.currentTime)
+            bankPartialHold(hold: result.hold, progress: result.progress, at: releaseTime)
         }
     }
 
@@ -819,14 +846,23 @@ final class GameEngine: ObservableObject {
         let window = judge.config.goodWindow + InputJudge.Config.edgeGrace
 
         // Spatial path: a real finger position tries tile matching first.
+        // Evaluate every visible candidate in this lane, not just the note
+        // nearest in time. Same-lane holds can overlap on screen; choosing the
+        // closest projected tile makes the finger's location authoritative and
+        // gives an earlier tile a deterministic tie-break. Once a hold starts,
+        // the lane guard above prevents later candidates from being activated
+        // by that same sustained contact.
         let spatial = point != SpatialCatch.unspecifiedTouch
         if spatial {
             let lead = dynamicLead(at: time)
-            let candidates = scheduler.nearestPerLane(to: time, window: max(window, lead))
-            if let candidate = candidates[lane] {
-                let headProgress = visualProgress(noteTime: candidate.note.time, at: projectionTime(for: time))
+            let projectedTime = projectionTime(for: time)
+            // `candidates` is chronological. The earliest tile that contains
+            // the finger owns the contact; a later overlapping tile must not
+            // steal a hold just because its projected center is closer.
+            for candidate in scheduler.candidates(in: lane, to: time, window: max(window, lead)) {
+                let headProgress = visualProgress(noteTime: candidate.note.time, at: projectedTime)
                 let tailProgress = candidate.note.type == .hold
-                    ? visualProgress(noteTime: candidate.note.time + candidate.note.duration, at: projectionTime(for: time))
+                    ? visualProgress(noteTime: candidate.note.time + candidate.note.duration, at: projectedTime)
                     : nil
                 let distance = SpatialCatch.distance(headProgress: headProgress,
                                                       tailProgress: tailProgress,
@@ -834,25 +870,27 @@ final class GameEngine: ObservableObject {
                                                       hitLineY: PlayfieldGeometry.hitLineY,
                                                       topY: PlayfieldGeometry.topY,
                                                       tileHeightFraction: PlayfieldGeometry.tileHeightFraction)
-                if distance <= PlayfieldGeometry.spatialCatchDistance {
-                    // Judgment floor: a tap physically ON a visible tile is
-                    // at worst a GOOD — the player aimed correctly; only the
-                    // grade reflects timing.
-                    let raw = judge.classifyForgiving(tapTime: heardTime, noteTime: candidate.note.time)
-                    let judgment: Judgment = raw == .miss ? .good : raw
-                    #if DEBUG
-                    print(String(format: "[Input] lane=%d touchY=%.2f note=%.3fs audio=%.3fs Δ%+.0fms d=%.2f → %@ (spatial)",
-                                 lane, point.y, candidate.note.time, time,
-                                 (heardTime - candidate.note.time) * 1000,
-                                 distance, judgment.displayName.uppercased()))
-                    recordDebugHit(judgment: judgment, noteTime: candidate.note.time,
-                                   tapTime: time)
-                    #endif
-                    recordPracticeHit(judgment: judgment, noteTime: candidate.note.time, tapTime: time)
-                    apply(judgment, index: candidate.index, lane: lane, time: time,
-                          strength: candidate.note.strength)
-                    return (candidate.note, candidate.index)
-                }
+                guard distance <= PlayfieldGeometry.spatialCatchDistance else { continue }
+
+                // Judgment floor: a tap physically ON a visible tile is
+                // at worst a GOOD — the player aimed correctly; only the
+                // grade reflects timing. Returning immediately is important:
+                // same-lane overlapping tiles remain owned by this contact's
+                // first chronological candidate.
+                let raw = judge.classifyForgiving(tapTime: heardTime, noteTime: candidate.note.time)
+                let judgment: Judgment = raw == .miss ? .good : raw
+                #if DEBUG
+                print(String(format: "[Input] lane=%d touchY=%.2f note=%.3fs audio=%.3fs Δ%+.0fms d=%.2f → %@ (spatial)",
+                             lane, point.y, candidate.note.time, time,
+                             (heardTime - candidate.note.time) * 1000,
+                             distance, judgment.displayName.uppercased()))
+                recordDebugHit(judgment: judgment, noteTime: candidate.note.time,
+                               tapTime: time)
+                #endif
+                recordPracticeHit(judgment: judgment, noteTime: candidate.note.time, tapTime: time)
+                apply(judgment, index: candidate.index, lane: lane, time: time,
+                      strength: candidate.note.strength)
+                return (candidate.note, candidate.index)
             }
         }
 
@@ -895,20 +933,30 @@ final class GameEngine: ObservableObject {
         // the exact head timestamp. Real touches use the same heard-time
         // coordinate as release, so partial progress is proportional.
         let rawPressTime = min(time ?? player.currentTime, endTime - 0.001)
+        // Hold sustain lives on the projected song timeline. Do not apply the
+        // tap calibration offset to this interval: calibration changes head
+        // judgment only and must never stretch the physical hold beyond its
+        // chart tail.
         let pressTime = isAutoplay
             ? rawPressTime
-            : judgedTime(for: rawPressTime)
-        guard pressTime < endTime else { return }
-        holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
-                    startTime: pressTime, endTime: endTime)
+            : projectionTime(for: rawPressTime)
+        // A spatial body catch may happen before the chart head reaches the
+        // line. Keep the chart tail authoritative and begin the measured
+        // sustain at the actual press for the remaining interval.
+        let sustainStartTime = max(hit.note.time, pressTime)
+        guard sustainStartTime < endTime else { return }
+        guard holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
+                          startTime: sustainStartTime, endTime: endTime) != nil else { return }
+        holdLaneLocks.insert(hit.note.lane)
         if let pattern = HapticPatternGenerator.holdStartPattern(profile: hapticProfile,
                                                                  enabled: settings.hapticsEnabled,
                                                                  strengthScale: settings.hapticStrength) {
             haptics.play(pattern)
         }
         #if DEBUG
-        print(String(format: "[Hold] lane=%d head=%.3fs tail=%.3fs (%.2fs)",
-                     hit.note.lane, hit.note.time, hit.note.time + hit.note.duration, hit.note.duration))
+        print(String(format: "[Hold] lane=%d press=%.3fs sustainStart=%.3fs head=%.3fs tail=%.3fs musical=%.3fs",
+                     hit.note.lane, pressTime, sustainStartTime, hit.note.time,
+                     endTime, hit.note.duration))
         #endif
     }
 
@@ -937,6 +985,7 @@ final class GameEngine: ObservableObject {
 
     /// Render queries for holds (the playfield needs to know how to draw one).
     func holdActive(lane: Int) -> Bool { holds.isActive(lane: lane) }
+    func holdActive(id: Int) -> Bool { holds.isActive(noteID: id) }
     func holdCompleted(id: Int) -> Bool { holds.state(for: id) == .completed }
     func holdTailTime(lane: Int) -> Double? { holds.activeHold(lane: lane)?.endTime }
     func holdStartTime(lane: Int) -> Double? { holds.activeHold(lane: lane)?.startTime }
@@ -951,14 +1000,23 @@ final class GameEngine: ObservableObject {
     func holdProgress(lane: Int, at time: Double? = nil) -> Double? {
         let sustainTime: Double
         if let time {
-            sustainTime = isAutoplay ? time : time + settings.calibrationOffsetMs / 1000
+            // Renderer callers already provide the latency-compensated
+            // absolute song time. Calibration is intentionally excluded: it is
+            // a point-judgment preference, not a hold-duration adjustment.
+            sustainTime = time
         } else {
-            let projected = isAutoplay
-                ? player.currentTime
-                : projectionTime(for: player.currentTime)
-            sustainTime = isAutoplay ? projected : projected + settings.calibrationOffsetMs / 1000
+            sustainTime = holdTimelineTime(for: player.currentTime)
         }
         return holds.progress(lane: lane, at: sustainTime)
+    }
+
+    /// Spatial progress through an active hold's musical interval. This is
+    /// computed from the same integrated positive speed curve as note heads
+    /// and tails, so the fill boundary accelerates/decelerates with Dynamic
+    /// Speed without changing the hold's start/end timestamps.
+    func holdRelativeVisualProgress(startTime: Double, endTime: Double,
+                                    at time: Double) -> Double {
+        speedProfile.relativeProgress(from: startTime, to: endTime, at: time)
     }
 
     // MARK: - Rendering queries
@@ -982,6 +1040,10 @@ final class GameEngine: ObservableObject {
 
     private func projectionTime(for rawTime: Double) -> Double {
         rawTime - (renderLatencyForRun ?? max(0, player.outputLatency))
+    }
+
+    private func holdTimelineTime(for rawTime: Double) -> Double {
+        isAutoplay ? rawTime : projectionTime(for: rawTime)
     }
 
     private func judgedTime(for rawTime: Double) -> Double {
@@ -1042,13 +1104,22 @@ final class GameEngine: ObservableObject {
             autoplayTick(at: t)
         }
 
-        // Hold completions: the finger (or autoplay) has sustained past the
-        // tail on the audio clock.
+        let holdTime = holdTimelineTime(for: t)
         if !holds.active.isEmpty {
-            let due = holds.active.filter { gameplayTime >= $0.value.endTime && (isAutoplay || touchesDown.contains($0.key)) }
+            // An active hold represents a contact that has already been
+            // accepted. Releasing before the tail is handled synchronously by
+            // `handleTouchUp`; once the authoritative timeline reaches the
+            // tail, completion must not depend on a later touch-up or a
+            // successfully delivered UIKit touch-state callback. This removes
+            // the old indefinite-active edge case without changing the tail.
+            let due = holds.active.filter { holdTime >= $0.value.endTime }
             for (lane, _) in due {
                 if let hold = holds.complete(lane: lane) {
-                    completeHold(hold: hold, at: gameplayTime)
+                    completeHold(hold: hold, at: holdTime)
+                    #if DEBUG
+                    print(String(format: "[HoldTiming] automatic completion timeline=%.3fs tail=%.3fs delta=%+.0fms",
+                                 holdTime, hold.endTime, (holdTime - hold.endTime) * 1000))
+                    #endif
                 }
             }
         }

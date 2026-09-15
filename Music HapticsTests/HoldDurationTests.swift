@@ -3,23 +3,28 @@ import XCTest
 
 /// Hold-duration contract: a hold completes in proportion to how long the
 /// finger actually stayed down — never instantly, never all-or-nothing.
-/// Pins the press-time anchor (progress starts when the finger goes down,
-/// not at the chart timestamp) and the measured release progress that the
-/// renderer's fill and the partial bank both consume.
+/// The chart tail remains authoritative; input latency and tap calibration must
+/// not make the player sustain beyond the musical interval.
 @MainActor
 final class HoldDurationTests: XCTestCase {
 
     private var player: MutableClockPlayer!
     private var engine: GameEngine!
     private var chart: Chart!
+    private var settings: SettingsStore!
 
     override func setUp() {
         super.setUp()
+        // SettingsStore persists calibration by design. Keep this suite isolated
+        // so the calibration test cannot leak a point-judgment offset into the
+        // hold or latency suites that run after it.
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
         player = MutableClockPlayer()
         chart = Self.makeChart()
+        settings = SettingsStore()
         engine = GameEngine(audioURL: URL(fileURLWithPath: "/tmp/hold-duration-stub.wav"),
                             songTitle: "Hold Duration", chart: chart,
-                            analysis: nil, settings: SettingsStore(), practice: nil,
+                            analysis: nil, settings: settings, practice: nil,
                             player: player)
         engine.start()
     }
@@ -29,6 +34,9 @@ final class HoldDurationTests: XCTestCase {
         engine = nil
         player = nil
         chart = nil
+        settings?.calibrationOffsetMs = 0
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
+        settings = nil
         super.tearDown()
     }
 
@@ -54,8 +62,6 @@ final class HoldDurationTests: XCTestCase {
                        "releasing halfway through must measure half")
         XCTAssertEqual(holds.recordedProgress(noteID: 7) ?? -1, 0.5, accuracy: 0.0001,
                        "the measured fraction survives release for the renderer")
-
-        // Re-querying the (now removed) active hold must not fabricate a value.
         XCTAssertNil(holds.progress(lane: 0, at: 4.0))
     }
 
@@ -75,32 +81,24 @@ final class HoldDurationTests: XCTestCase {
         XCTAssertEqual(holds.recordedProgress(noteID: 3) ?? -1, 1, accuracy: 0.0001)
     }
 
-    // MARK: - Engine level: press-time anchoring
+    // MARK: - Engine level: duration and release behavior
 
     func testProgressAnchorsAtActualPressTime() {
-        // Press the hold's body mid-lane while the head is still inbound.
-        // The visible fill must start at ZERO on the press and grow with the
-        // finger — never jump to the head's chart timestamp (the "instantly
-        // goes" bug). The fill completes exactly at the musical tail.
+        // A body catch starts the interaction before the head reaches the
+        // line, but the measured sustain is still bounded by the chart tail.
         player.now = 3.6
         let travel = PlayfieldGeometry.hitLineY - PlayfieldGeometry.topY
         let bodyY = PlayfieldGeometry.hitLineY - travel * 0.5
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: Double(bodyY)))
         XCTAssertTrue(engine.holdActive(lane: 1), "body press starts the sustain")
 
-        player.now = 3.7   // 100 ms of real pressing
-        let early = engine.holdProgress(lane: 1) ?? -1
-        XCTAssertLessThan(early, 0.15,
-                          "fill starts near zero at the press (was ~35% pre-filled)")
-
-        player.now = 4.1   // 0.5 s of pressing, 1.4 s span to the tail
+        player.now = 3.7
         let progress = engine.holdProgress(lane: 1) ?? -1
-        XCTAssertEqual(progress, 0.5 / 1.4, accuracy: 0.01,
-                       "fill is measured from the press toward the tail")
+        XCTAssertEqual(progress, 0.1 / 1.4, accuracy: 0.01,
+                       "a body catch starts the remaining physical sustain at the touch-down time")
     }
 
     func testHeadPressProgressUsesFullMusicalSpan() {
-        // The common case: pressing at the head, the span IS the duration.
         player.now = 3.0
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
         player.now = 4.0
@@ -113,26 +111,96 @@ final class HoldDurationTests: XCTestCase {
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
         XCTAssertTrue(engine.holdActive(lane: 1))
 
-        player.now = 4.0   // exactly half the 2 s hold
+        player.now = 4.0
         engine.handleTouchUp(lane: 1)
 
         XCTAssertFalse(engine.holdActive(lane: 1))
         let points = engine.holdPopups.last?.points ?? 0
-        // Default holdCompleteBonus is 500 → half a hold banks 250.
         XCTAssertEqual(points, Int(Double(SettingsStore().holdCompleteBonus) * 0.5),
-                       "half a hold must bank half the bonus — measured, not instant")
+                       "half a hold must bank half the bonus")
         XCTAssertEqual(engine.counts[.miss] ?? 0, 0)
     }
 
-    func testHoldNeverCompletesBeforeItsTail() {
-        // A release clearly before the tail (outside the 60 ms grace) must
-        // NOT complete — and must record the honest fraction achieved.
+    func testBodyCatchBeforeHeadDoesNotExtendPhysicalHold() {
+        // A visible body can be touched before the chart head reaches the
+        // line. The player must not be forced to hold from that early catch
+        // all the way to the tail.
+        player.now = 2.2
+        let travel = PlayfieldGeometry.hitLineY - PlayfieldGeometry.topY
+        let bodyY = PlayfieldGeometry.hitLineY - travel * 0.5
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: Double(bodyY)))
+
+        XCTAssertTrue(engine.holdActive(lane: 1))
+        XCTAssertEqual(engine.holdStartTime(lane: 1) ?? -1, 3.0, accuracy: 0.001,
+                       "an early body catch must not extend the required physical duration")
+        XCTAssertEqual(engine.holdTailTime(lane: 1) ?? -1, 5.0, accuracy: 0.001,
+                       "the chart tail remains authoritative")
+    }
+
+    func testTailReleaseAtMusicalEndpointCompletes() {
         player.now = 3.0
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
-        player.now = 4.90   // 1.9 s held, 100 ms early
+        player.now = 5.0
+        engine.handleTouchUp(lane: 1)
+
+        XCTAssertEqual(engine.holdState(for: 0), .completed)
+        XCTAssertEqual(engine.recordedHoldProgress(id: 0) ?? -1, 1, accuracy: 0.0001)
+    }
+
+    func testReleaseGraceIsSmallAndDoesNotExtendTheHold() {
+        player.now = 3.0
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+
+        player.now = 4.95
+        engine.handleTouchUp(lane: 1)
+        XCTAssertEqual(engine.holdState(for: 0), .completed,
+                       "release inside the small tail grace completes")
+
+        engine.restart()
+        player.now = 3.0
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+        player.now = 4.90
         engine.handleTouchUp(lane: 1)
         XCTAssertEqual(engine.holdState(for: 0), .releasedEarly)
-        XCTAssertEqual(engine.recordedHoldProgress(id: 0) ?? -1, 0.95, accuracy: 0.01,
-                       "nearly-full release records nearly-full progress")
+        XCTAssertEqual(engine.recordedHoldProgress(id: 0) ?? -1, 0.95, accuracy: 0.01)
+    }
+
+    func testTapCalibrationCannotStretchHoldDuration() {
+        settings.calibrationOffsetMs = 100
+        player.now = 3.0
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+        player.now = 4.90
+        engine.handleTouchUp(lane: 1)
+
+        XCTAssertEqual(engine.holdState(for: 0), .releasedEarly,
+                       "tap calibration must not move the hold tail or release clock")
+        XCTAssertEqual(engine.recordedHoldProgress(id: 0) ?? -1, 0.95, accuracy: 0.01)
+    }
+
+    func testOutputLatencyDoesNotAddToPhysicalHoldDuration() {
+        player.outputLatency = 0.12
+        player.now = 3.12
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+        player.now = 5.12
+        engine.handleTouchUp(lane: 1)
+
+        XCTAssertEqual(engine.holdState(for: 0), .completed,
+                       "driver latency is projected once, not added to required finger time")
+    }
+
+    func testPauseCancelsActiveHoldWithoutMovingItsChartTail() {
+        player.now = 3.0
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+        XCTAssertTrue(engine.holdActive(lane: 1))
+
+        player.now = 3.5
+        engine.pause()
+        XCTAssertFalse(engine.holdActive(lane: 1),
+                       "pausing releases the physical contact instead of extending it through paused time")
+
+        player.now = 20.0
+        engine.resume()
+        XCTAssertFalse(engine.holdActive(lane: 1),
+                       "resume must not resurrect or extend a stale hold")
     }
 }

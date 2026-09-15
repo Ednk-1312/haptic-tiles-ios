@@ -28,11 +28,11 @@ enum HoldState: String, Sendable, Equatable {
 struct HoldTracker: Sendable {
     /// A hold being sustained: the finger is down on the note.
     struct Active: Sendable {
-        let index: Int        // scheduler index
+        let index: Int
         let noteID: Int
         let lane: Int
-        let startTime: Double // audio time the finger began sustaining
-        let endTime: Double   // audio time of the musical tail
+        let startTime: Double
+        let endTime: Double
     }
 
     /// Result of lifting a finger from a hold. Keeping the measured progress
@@ -45,21 +45,23 @@ struct HoldTracker: Sendable {
         let progress: Double
     }
 
-    /// Lane → hold currently being sustained.
+    /// Release tolerance in the authoritative song timeline. This is a small
+    /// usability grace at the musical tail, not an extension of the hold
+    /// duration and not a change to note timing.
+    static let releaseGrace: Double = 0.06
+
     private(set) var active: [Int: Active] = [:]
-    /// Note id → explicit lifecycle state.
     private(set) var stateByNote: [Int: HoldState] = [:]
-    /// Final sustain fraction for notes that have left the active set. The
-    /// renderer uses this for a short, honest partial-release animation.
     private(set) var progressByNote: [Int: Double] = [:]
 
     // MARK: - Transitions
 
-    /// The head was hit and the finger is down: notStarted → active.
+    /// Starts a hold only when its lane is free. A sustained finger cannot
+    /// activate or replace a second hold further ahead in the same lane.
     @discardableResult
     mutating func start(lane: Int, index: Int, noteID: Int,
                         startTime: Double, endTime: Double) -> Active? {
-        guard endTime > startTime else { return nil }
+        guard endTime > startTime, active[lane] == nil else { return nil }
         let hold = Active(index: index, noteID: noteID, lane: lane,
                           startTime: startTime, endTime: endTime)
         active[lane] = hold
@@ -68,11 +70,9 @@ struct HoldTracker: Sendable {
         return hold
     }
 
-    /// The finger came up. A release at (or within `grace` of) the tail
-    /// completes; anything earlier is a releasedEarly miss. Returns the hold
-    /// and whether it completed — removes it from the active set either way.
+    /// Releases the active hold and records its actual sustain fraction.
     @discardableResult
-    mutating func release(lane: Int, at time: Double, grace: Double = 0.06)
+    mutating func release(lane: Int, at time: Double, grace: Double = HoldTracker.releaseGrace)
         -> ReleaseResult? {
         guard let hold = active.removeValue(forKey: lane) else { return nil }
         let sustained = progress(of: hold, at: time)
@@ -83,7 +83,7 @@ struct HoldTracker: Sendable {
         return ReleaseResult(hold: hold, completed: completed, progress: finalProgress)
     }
 
-    /// The finger is still down and the tail has arrived on the audio clock.
+    /// Completes the hold when the authoritative audio clock reaches its tail.
     mutating func complete(lane: Int) -> Active? {
         guard let hold = active.removeValue(forKey: lane) else { return nil }
         stateByNote[hold.noteID] = .completed
@@ -91,16 +91,14 @@ struct HoldTracker: Sendable {
         return hold
     }
 
-    /// A hold head was never touched and its time window passed: → missed.
+    /// Marks an untouched hold head as missed.
     mutating func markMissed(noteID: Int) {
         guard stateByNote[noteID] == nil else { return }
         stateByNote[noteID] = .missed
         progressByNote[noteID] = 0
     }
 
-    /// Pause / restart / song change / practice jump: drop every active hold
-    /// AND every recorded state. No hold state may survive a transition —
-    /// a later run must not see yesterday's holds.
+    /// Clears all state on pause/restart/song change.
     mutating func cancelAll() {
         active.removeAll()
         stateByNote.removeAll()
@@ -117,33 +115,39 @@ struct HoldTracker: Sendable {
         active[lane] != nil
     }
 
-    /// 0…1 fraction of the hold consumed at `time` (active holds only).
-    func progress(lane: Int, at time: Double) -> Double? {
-        guard let hold = active[lane] else { return nil }
-        return progress(of: hold, at: time)
-    }
-
-    /// Progress for an arbitrary active hold. The result is based on the
-    /// actual press start and the musical tail, so holding for half the span
-    /// produces half the completion rather than an all-or-nothing result.
-    func progress(of hold: Active, at time: Double) -> Double {
-        let span = hold.endTime - hold.startTime
-        guard span > 0 else { return 1 }
-        return min(1, max(0, (time - hold.startTime) / span))
-    }
-
-    /// Final progress for a completed, released-early, or missed hold.
-    func recordedProgress(noteID: Int) -> Double? {
-        progressByNote[noteID]
+    func isActive(noteID: Int) -> Bool {
+        active.values.contains { $0.noteID == noteID }
     }
 
     func activeHold(lane: Int) -> Active? {
         active[lane]
     }
 
+    func activeHold(noteID: Int) -> Active? {
+        active.values.first { $0.noteID == noteID }
+    }
+
+    /// 0…1 fraction of the active hold consumed at `time`.
+    func progress(lane: Int, at time: Double) -> Double? {
+        guard let hold = active[lane] else { return nil }
+        return progress(of: hold, at: time)
+    }
+
+    /// Progress for an arbitrary active hold, based on authoritative time.
+    func progress(of hold: Active, at time: Double) -> Double {
+        let span = hold.endTime - hold.startTime
+        guard span > 0 else { return 1 }
+        return min(1, max(0, (time - hold.startTime) / span))
+    }
+
+    func recordedProgress(noteID: Int) -> Double? {
+        progressByNote[noteID]
+    }
+
     /// Every note id that has reached a terminal state (diagnostics).
     var terminalNoteIDs: [Int] {
-        stateByNote.filter { $0.value == .completed || $0.value == .missed || $0.value == .releasedEarly }
+        stateByNote
+            .filter { $0.value == .completed || $0.value == .missed || $0.value == .releasedEarly }
             .map(\.key)
     }
 }

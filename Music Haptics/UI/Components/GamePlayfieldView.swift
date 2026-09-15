@@ -105,10 +105,11 @@ struct GamePlayfieldView: View {
                     drawHoldPopups(context, size: canvasSize, time: t)
                 }
             }
-            // Gameplay is a continuous animation; hint Core Animation to
-            // prioritize the frame cadence instead of discovering it after a
-            // few stuttering frames.
-            .drawingGroup()
+            // Canvas already renders through SwiftUI's GPU-backed drawing path.
+            // An additional full-screen drawingGroup creates an off-screen
+            // surface for every display refresh; on physical devices that can
+            // produce flashes and compete with the background compositor.
+            // Keep the Canvas direct so only the pixels that changed are drawn.
             .onAppear {
                 #if DEBUG
                 print(String(format: "[Playfield] canvas %.1f x %.1f pt → lane width %.1f pt (W/4)",
@@ -376,12 +377,23 @@ struct GamePlayfieldView: View {
                           time: Double, x: CGFloat, width: CGFloat,
                           hitY: CGFloat, travel: CGFloat,
                           headProgress: Double, tailProgress: Double) {
-        // Not on screen yet (or long past, fully gone).
-        guard headProgress < 1.02, tailProgress > -0.3 else { return }
+        // The hold disappears exactly when its musical tail reaches the hit
+        // line. There is no post-line hold animation: completion feedback is
+        // handled by the engine's lane flash/popup, so the long tile cannot
+        // continue moving or flash below the playfield after its endpoint.
+        guard headProgress < 1.02, tailProgress >= 0 else { return }
 
-        let topY = hitY - CGFloat(headProgress) * travel
-        var bottomY = hitY - CGFloat(tailProgress) * travel
-        bottomY = min(bottomY, hitY + travel)   // tail may have passed the line
+        // Once the head reaches the catch line it is consumed there. Clamping
+        // its projection prevents the body/fill from continuing below the line
+        // while the tail is still travelling through a dynamic-speed region.
+        let visibleHeadProgress = max(0, headProgress)
+        let visibleTailProgress = max(0, tailProgress)
+        if engine.holdCompleted(id: note.id) {
+            return
+        }
+
+        let topY = hitY - CGFloat(visibleHeadProgress) * travel
+        let bottomY = hitY - CGFloat(visibleTailProgress) * travel
         let rect = CGRect(x: x, y: min(topY, bottomY), width: width,
                           height: max(14, abs(bottomY - topY)))
         let corner = min(6, width * 0.06)
@@ -391,15 +403,8 @@ struct GamePlayfieldView: View {
             context.fill(path, with: .color(.red.opacity(0.5)))
             return
         }
-        if engine.holdCompleted(id: note.id) {
-            // Sustained to the end: bright lane flash, then fade with the tile.
-            let age = time - (note.time + note.duration)
-            let fade = age < 0.15 ? 0.95 : max(0.12, 0.45 - age * 0.9)
-            context.fill(path, with: .color(laneTop(note.lane).opacity(fade)))
-            return
-        }
 
-        if engine.holdActive(lane: note.lane) {
+        if engine.holdActive(id: note.id) {
             drawActiveHold(context, note: note, rect: rect, corner: corner,
                            hitY: hitY, travel: travel, time: time)
             return
@@ -458,22 +463,17 @@ struct GamePlayfieldView: View {
         // The fill is projected from timestamps, not from a frame counter or
         // a constant pixels-per-second animation. This keeps it locked to the
         // same integrated DynamicSpeedProfile as the hold head and tail.
+        // Fill follows the integrated spatial path through the same Dynamic
+        // Speed profile as the head and tail. Scoring still uses the separate
+        // authoritative musical-time fraction in the engine; this visual
+        // fraction is what makes a slow → fast → slow hold look continuous
+        // instead of advancing at a static speed.
         let holdStart = engine.holdStartTime(lane: note.lane) ?? note.time
         let holdEnd = note.time + note.duration
-        let fraction = min(1, max(0, engine.holdProgress(lane: note.lane, at: time) ?? 0))
-        let consumedTime = min(holdEnd, max(holdStart,
-                                             holdStart + (holdEnd - holdStart) * fraction))
-        // If a player pressed early on the incoming body, the visual fill
-        // starts at the actual press position. In the normal head-press case
-        // that is the chart head. Both endpoints use the same absolute-time
-        // projection as the body, so a speed change cannot make the fill lag.
-        let fillStartTime = holdStart
-        let startProgress = engine.visualProgress(noteTime: fillStartTime, at: time)
-        let endProgress = engine.visualProgress(noteTime: consumedTime, at: time)
-        let startY = hitY - CGFloat(startProgress) * travel
-        let endY = hitY - CGFloat(endProgress) * travel
-        let fillMinY = max(rect.minY, min(rect.maxY, min(startY, endY)))
-        let fillMaxY = min(rect.maxY, max(rect.minY, max(startY, endY)))
+        let visualFraction = min(1, max(0, engine.holdRelativeVisualProgress(
+            startTime: holdStart, endTime: holdEnd, at: time)))
+        let fillMaxY = rect.maxY
+        let fillMinY = max(rect.minY, fillMaxY - rect.height * CGFloat(visualFraction))
         let fillHeight = max(0, fillMaxY - fillMinY)
         // Unconsumed remainder above the fill keeps the black piano look.
         let bodyGradient = Gradient(colors: [
@@ -524,11 +524,16 @@ struct GamePlayfieldView: View {
                                      tailY: CGFloat, width: CGFloat,
                                      bodyTop: CGFloat, bodyBottom: CGFloat,
                                      radius: CGFloat) {
-        let r = min(radius, width * 0.28)
-        let maxCenter = bodyBottom - r * 0.55
-        let minCenter = bodyTop + r * 0.55
+        // Keep the entire ring inside the body. A stroke is centered on the
+        // ellipse path, so leave the full radius of clearance—not the old
+        // half-radius heuristic that visibly let the circle sit outside the
+        // tile at the hit line.
+        let bodyHeight = max(0, bodyBottom - bodyTop)
+        let r = min(radius, width * 0.28, max(1, bodyHeight * 0.45))
+        let maxCenter = bodyBottom - r
+        let minCenter = bodyTop + r
         let cy = min(max(tailY, minCenter), maxCenter)
-        guard bodyBottom - cy > 0, cy - bodyTop > 0 else { return }
+        guard bodyHeight >= 2 * r, maxCenter >= minCenter else { return }
         var ring = Path()
         ring.addEllipse(in: CGRect(x: midX - r, y: cy - r, width: r * 2, height: r * 2))
         context.stroke(ring, with: .color(.white.opacity(0.9)), lineWidth: 2.2)

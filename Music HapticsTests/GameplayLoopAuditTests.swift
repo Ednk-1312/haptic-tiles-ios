@@ -12,6 +12,18 @@ import XCTest
 /// injects the real AVAudioPlayer-backed clock by default.
 final class GameplayLoopAuditTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        // SettingsStore is intentionally persistent in the app; tests must not
+        // inherit a calibration offset written by another suite.
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "settings.calibrationOffsetMs")
+        super.tearDown()
+    }
+
     @MainActor
     func testRapidPlayRestartRestartExitPlayKeepsOneLoop() throws {
         let engine = Self.makeEngine()
