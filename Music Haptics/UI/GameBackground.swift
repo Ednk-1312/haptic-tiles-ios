@@ -309,28 +309,11 @@ struct GameBackgroundView: View {
     var body: some View {
         ZStack {
             Color(red: 0.04, green: 0.045, blue: 0.10)
-            // Blurred artwork kept subtle so the bright reference gradient
-            // stays dominant while the song still tints the room.
-            if motionAllowed, let art = theme.blurredArtwork {
-                Image(uiImage: art)
-                    .resizable()
-                    .scaledToFill()
-                    .opacity(0.26)
-                    .scaleEffect(1.0 + 0.03 * pulse)
-                    .accessibilityHidden(true)
-            }
-            // Hero layer: enlarged/cropped artwork, slowly reacting to energy.
-            // Uses the quantized energy so the transform only changes when the
-            // section genuinely shifts — not every audio-clock tick.
-            if effects != .off, let hero = theme.heroArtwork {
-                Image(uiImage: hero)
-                    .resizable()
-                    .scaledToFill()
-                    .opacity(reduceMotion ? 0.12 : 0.12 + 0.05 * energyRounded)
-                    .scaleEffect(reduceMotion ? 1.12 : 1.12 + 0.05 * energyRounded)
-                    .offset(y: reduceMotion ? 0 : CGFloat((energyRounded - 0.5) * 10))
-                    .accessibilityHidden(true)
-            }
+            // Artwork remains available for palette/mood extraction, but is
+            // intentionally not rendered in gameplay. A visible hero/cover
+            // layer near the top was repeatedly mistaken for a second HUD
+            // panel and competed with the note stream on physical devices.
+            // Gameplay now uses only the stable genre/artwork-derived colors.
             // Reference-style wash: vivid blue at the top-left melting into
             // purple/pink at the bottom-right, blended with the song's own
             // extracted colors so every track keeps its own atmosphere.

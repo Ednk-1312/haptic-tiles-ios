@@ -474,7 +474,13 @@ struct GamePlayfieldView: View {
         // feedback animation—not note timing, release tolerance, or bonus math.
         let visualFraction = min(1, max(0, engine.holdVisualProgress(
             lane: note.lane, at: time) ?? 0))
-        let fillMaxY = rect.maxY
+        // Once the head has been caught it has passed the hit line and its
+        // projected bottom is below the playable field. Anchoring the fill to
+        // `rect.maxY` therefore hid the first part of the hold animation below
+        // the line; the player saw no progress until the tail arrived. The
+        // visible hold is anchored at the hit line, while its logical progress
+        // still comes from the authoritative audio clock.
+        let fillMaxY = min(rect.maxY, hitY)
         let fillMinY = max(rect.minY, fillMaxY - rect.height * CGFloat(visualFraction))
         let fillHeight = max(0, fillMaxY - fillMinY)
         // Unconsumed remainder above the fill keeps the black piano look.
