@@ -1,8 +1,8 @@
 # Haptic Tiles / Music Haptics — Project Progress
 
 **App:** Haptic Piano (bundle `com.eshannandakumarpersonalteam.MusicHaptics`)
-**Current version:** 1.1 (14) · **599 automated tests, all passing**
-**Last updated:** September 14, 2026
+**Current version:** 1.1 (14) · **606 automated tests, all passing**
+**Last updated:** September 15, 2026
 
 ---
 
@@ -329,7 +329,41 @@ judgment classification.
 
 ---
 
-## 6. Version / build history
+## 6. Difficulty-system validation pass (September 15, 2026)
+
+- Replaced the earlier raw-note difficulty score with a deterministic,
+  action-based metric. Notes within 100 ms are one reaction event; chord
+  coordination is a bounded additional demand rather than double-counted
+  density.
+- The score now combines reaction density, one-second bursts, tight intervals,
+  sustained active-section load, lane movement, alternation, chords, holds, and
+  interval irregularity. Long silence does not dilute the active section, while
+  invalid/non-finite timestamps, durations, and strengths are ignored safely.
+- Difficulty remains authoritative and deterministic for chart diagnostics and
+  generation. Core ML output is advisory only; it cannot change note timestamps,
+  hit windows, scoring, or Dynamic Speed.
+- Retrained `AIDifficulty` and `AIEventRanking` as model version 2 against
+  `synth-v4-corrected-difficulty-2026-09-15`. The difficulty model's held-out
+  song-disjoint evaluation is MAE 0.0757, RMSE 0.1194, correlation 0.9942.
+  These are synthetic training-data metrics, not commercial-song claims.
+- Restored the shared tempo metadata in the model manifest so regenerating the
+  difficulty/event models cannot erase the already-validated `AITempo` record.
+- Added boundary coverage for empty, sparse, dense, chord-heavy, hold-heavy,
+  extreme-movement, and invalid/non-finite charts.
+- Focused difficulty/AI validation: 23/23 passed. Full iOS 26.3.1 simulator
+  test plan on iPhone 17 Pro: 606/606 passed. A generic iOS 26 device build
+  succeeded and included `AIDifficulty.mlmodelc`, `AIEventRanking.mlmodelc`,
+  and `AITempo.mlmodelc`.
+- No suitable legally available local commercial-song audio fixtures exist in
+  the repository; real-song tempo quality therefore remains unverified. The
+  prior generated-fixture benchmark remains the evidence: warmed DSP analysis
+  was approximately 0.5–1.8 seconds for 24–92 second inputs with 3.6–7.6 MB
+  peak RSS deltas. Core ML inference was validated functionally but was not
+  separately benchmarked in that run.
+- Physical-device testing is unavailable because the development iPhone was
+  updated to iOS 27; no iOS 27 or physical-device result is claimed.
+
+## 7. Version / build history
 
 | Version | Build | Milestone |
 |---|---|---|

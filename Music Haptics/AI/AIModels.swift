@@ -7,10 +7,10 @@ import Foundation
 /// incompatible model change is detectable and triggers regeneration.
 enum AIModelCatalog {
     static let featureSchemaVersion = 1
-    static let difficultyModelVersion = 1
-    static let eventModelVersion = 1
-    static let patternModelVersion = 1
-    static let trainingDataVersion = "synth-v3-2026-09-05"
+    static let difficultyModelVersion = 2
+    static let eventModelVersion = 2
+    static let patternModelVersion = 2
+    static let trainingDataVersion = "synth-v4-corrected-difficulty-2026-09-15"
 
     static let difficultyFeatureCount = DifficultyFeatureExtractor.featureCount
     static let eventFeatureCount = EventFeatureExtractor.featureCount

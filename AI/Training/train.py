@@ -41,10 +41,10 @@ MODEL_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.join(REPO_ROOT, "Music
 OUT_DIR = os.path.join(REPO_ROOT, "AI", "Training", "out")
 
 FEATURE_SCHEMA = 1
-DIFFICULTY_MODEL_VERSION = 1
-EVENT_MODEL_VERSION = 1
-PATTERN_MODEL_VERSION = 1
-TRAINING_DATA_VERSION = "synth-v3-2026-09-05"   # v4 phrase-based charts + pattern ranking
+DIFFICULTY_MODEL_VERSION = 2
+EVENT_MODEL_VERSION = 2
+PATTERN_MODEL_VERSION = 2
+TRAINING_DATA_VERSION = "synth-v4-corrected-difficulty-2026-09-15"
 SEED = 42
 
 
@@ -280,6 +280,22 @@ def main():
                 "note": "held-out song-disjoint validation vs deterministic selection"
             },
         },
+        # Tempo is trained by train_tempo.py and remains part of the shared
+        # manifest when this difficulty/event pipeline regenerates it.
+        "tempoAnalysis": {
+            "modelVersion": 1,
+            "featureSchemaVersion": 1,
+            "featureCount": 12,
+            "trainingDataVersion": "tempo-synth-v1-2026-09-14",
+            "trainingRecordCount": 6120,
+            "evaluation": {
+                "mae": 0.05956,
+                "rmse": 0.15387,
+                "top1Accuracy": 1.0,
+                "baselineTop1Accuracy": 0.325,
+                "note": "held-out song-disjoint validation on deterministic synthetic onset envelopes"
+            }
+        }
     }
     if pattern_eval is not None:
         manifest["patternRanking"] = {

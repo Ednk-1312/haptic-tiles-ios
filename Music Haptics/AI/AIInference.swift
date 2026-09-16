@@ -80,6 +80,11 @@ actor AIEngine {
             let provider = try makeProvider(features: features, count: AIModelCatalog.difficultyFeatureCount)
             let output = try await model.prediction(from: provider, options: MLPredictionOptions())
             lastInferenceMs = Self.elapsedMs(from: started)
+            // The deterministic difficulty metric remains the source of truth
+            // for chart generation and scoring. This bundled model is a
+            // calibrated advisory estimate trained against that corrected
+            // metric; the fusion layer applies the bounded, deterministic
+            // influence policy when an AI result is available.
             return Self.scalarOutput(from: output)
         } catch {
             lastLoadError = "prediction failed: \(error)"

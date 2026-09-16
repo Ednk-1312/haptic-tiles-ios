@@ -80,7 +80,7 @@ final class AISynthesisTests: XCTestCase {
         XCTAssertEqual(AIModelCatalog.difficultyFeatureCount, 16)
         XCTAssertEqual(AIModelCatalog.eventFeatureCount, 16)
         XCTAssertEqual(AIModelCatalog.featureSchemaVersion, 1)
-        XCTAssertEqual(AIModelCatalog.difficultyModelVersion, 1)
-        XCTAssertEqual(AIModelCatalog.eventModelVersion, 1)
+        XCTAssertEqual(AIModelCatalog.difficultyModelVersion, 2)
+        XCTAssertEqual(AIModelCatalog.eventModelVersion, 2)
     }
 }

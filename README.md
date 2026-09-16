@@ -643,15 +643,17 @@ Tempo estimation has a capability-gated, two-tier preprocessing pipeline. Every 
 
 ## On-device AI (Version 1)
 
-Three small **real** Core ML models run on-device (no network, no server):
+The app ships small **real** Core ML models that run on-device (no network,
+no server):
 
-- `AIDifficulty.mlmodel` (96 KB) — 16 normalized chart/music features →
-  predicted difficulty 0–10. Held-out evaluation: MAE 0.027, RMSE 0.037,
-  correlation 0.996 vs the deterministic difficulty.
-- `AIEventRanking.mlmodel` (236 KB) — 16 normalized per-event features →
-  importance 0–1 for chart-selection value. Held-out evaluation: AUC 0.94,
-  precision 0.76 / recall 0.93 at 0.5, 85 % agreement with the deterministic
-  chart's own selection.
+- `AIDifficulty.mlmodel` (approximately 96 KB) — 16 normalized chart/music
+  features → predicted difficulty 0–10. Version 2 was retrained against the
+  corrected action-based difficulty metric; held-out evaluation: MAE 0.0757,
+  RMSE 0.1194, correlation 0.9942 versus the deterministic difficulty.
+- `AIEventRanking.mlmodel` (approximately 226 KB) — 16 normalized per-event
+  features → importance 0–1 for chart-selection value. Version 2 held-out
+  evaluation: AUC 0.9153, precision 0.3921 / recall 1.0 at 0.5, 80.5 %
+  agreement with the deterministic chart's own selection.
 - `AITempo.mlmodel` (42 KB) — 12 normalized onset-envelope features rank
   half-time, normal-time, and double-time BPM candidates. Held-out,
   song-disjoint validation on 2,400 deterministic synthetic songs produced
@@ -659,13 +661,13 @@ Three small **real** Core ML models run on-device (no network, no server):
   (MAE 0.05956, RMSE 0.15387). This model is an analysis aid, not a gameplay
   controller; the stable DSP result remains the fallback.
 
-All three are `GradientBoostingRegressor` tree ensembles converted from
-reproducible Python training pipelines (`AI/Training/train.py` and
-`AI/Training/train_tempo.py`) and compiled into the app bundle by Xcode
-(`coremlc`), so they run in the simulator and on any iPhone — Core ML, not
-Core AI: these are tiny numeric regressors that run everywhere, whereas Core
-AI (iOS 26+, Apple-Intelligence-gated) adds nothing
-for this workload.
+The difficulty and event models are `GradientBoostingRegressor` tree ensembles
+converted from the reproducible Python training pipeline
+(`AI/Training/train.py`) and compiled into the app bundle by Xcode (`coremlc`).
+The separate `AITempo.mlmodel` is documented in the Intelligent Tempo Analysis
+section above. These are tiny numeric regressors that run through Core ML, not
+Foundation Models/Core AI, and they are optional advisory layers over the
+Standard Math Engine.
 
 ### Event ranking (candidate selection)
 

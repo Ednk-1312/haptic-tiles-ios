@@ -178,8 +178,8 @@ final class AIStressTests: XCTestCase {
     // MARK: - Versioning sanity
 
     func testCatalogVersionsAreStablePositive() {
-        XCTAssertGreaterThan(AIModelCatalog.difficultyModelVersion, 0)
-        XCTAssertGreaterThan(AIModelCatalog.eventModelVersion, 0)
+        XCTAssertGreaterThanOrEqual(AIModelCatalog.difficultyModelVersion, 2)
+        XCTAssertGreaterThanOrEqual(AIModelCatalog.eventModelVersion, 2)
         XCTAssertGreaterThan(AIModelCatalog.featureSchemaVersion, 0)
         // Difficulty feature count must match what the extractor produces
         // (a schema change without a bump would silently break charts).
