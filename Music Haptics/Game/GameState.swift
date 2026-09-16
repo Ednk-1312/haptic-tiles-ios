@@ -75,4 +75,8 @@ struct GameSession: Identifiable, Sendable {
     /// The complete validated pre-game plan, retained for diagnostics and
     /// product surfaces. The real-time engine consumes only `points`.
     var enhancedGameplayPlan: PreparedGameplayPlan? = nil
+    /// Mood resolved before this session is presented. Gameplay never performs
+    /// a metadata lookup or network request; the renderer only consumes this
+    /// prepared value.
+    var backgroundMood: GenreMood = .neutral
 }

@@ -653,10 +653,13 @@ final class AppState {
         } else {
             plan = nil
         }
+        let backgroundMood = await GenreLookupService.shared.resolveMood(
+            title: record.title, artist: record.artist, localGenre: record.genre)
         return GameSession(chart: chart, analysis: analysis, audioURL: url,
                            title: record.title,
                            enhancedSpeedPoints: plan?.points,
-                           enhancedGameplayPlan: plan)
+                           enhancedGameplayPlan: plan,
+                           backgroundMood: backgroundMood)
     }
 
     /// Background pre-generation for a queued entry: resolves audio and
@@ -1007,10 +1010,15 @@ final class AppState {
         } else {
             plan = nil
         }
+        // Resolve the mood before presenting gameplay. The active game view
+        // must never start a metadata/network task alongside the audio clock.
+        let backgroundMood = await GenreLookupService.shared.resolveMood(
+            title: record.title, artist: record.artist, localGenre: record.genre)
         return GameSession(chart: chart, analysis: analysis, audioURL: url,
                            title: record.title, practice: practice,
                            enhancedSpeedPoints: plan?.points,
-                           enhancedGameplayPlan: plan)
+                           enhancedGameplayPlan: plan,
+                           backgroundMood: backgroundMood)
     }
 
     private func demoPracticeConfiguration() -> PracticeConfig? {

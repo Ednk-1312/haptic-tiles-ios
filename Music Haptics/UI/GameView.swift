@@ -9,7 +9,7 @@ struct GameSessionView: View {
     @EnvironmentObject private var settings: SettingsStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var engine: GameEngine
-    @State private var theme = SongBackgroundThemeFactory.make(artworkData: nil, seed: 0)
+    @State private var theme: SongBackgroundTheme
     @State private var comboPop = false
     @State private var resultsDismissed = false
     /// Throttle box for VoiceOver announcements (misses, holds, milestones).
@@ -80,30 +80,9 @@ struct GameSessionView: View {
         return "Score \(score)"
     }
 
-    /// Builds the song's background theme OFF the main actor, with the
-    /// genre/mood resolved FIRST (local metadata, else a timeout-bounded
-    /// cached lookup — both strictly pre-gameplay). The cheap deterministic
-    /// fallback covers the first frame; the real theme swaps in when ready.
-    /// Runs as a `.task(id:)` so leaving the session (song switch, exit)
-    /// cancels the build — a stale artwork can never land on another song.
-    private func loadBackgroundTheme() async {
-        let artworkData = song.artworkData
-        let seed = Self.stableSeed(song.id)
-        let sessionID = session.id
-        // Genre resolution happens before theme assembly and before gameplay
-        // is perceptually underway; it is disk-cached, so the network only
-        // pays once per song, and a timeout degrades to neutral/last cache.
-        let mood = await GenreLookupService.shared.resolveMood(
-            title: song.title,
-            artist: song.artist,
-            localGenre: song.genre)
-        guard !Task.isCancelled, sessionID == session.id else { return }
-        let built = await Task.detached(priority: .userInitiated) {
-            SongBackgroundThemeFactory.make(artworkData: artworkData, seed: seed, mood: mood)
-        }.value
-        guard !Task.isCancelled, sessionID == session.id else { return }
-        theme = built
-    }
+    /// The background theme is fully prepared before the session is presented.
+    /// In particular, no genre lookup or artwork task is allowed to begin after
+    /// the audio clock starts.
 
     private static func stableSeed(_ id: UUID) -> UInt64 {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -139,6 +118,10 @@ struct GameSessionView: View {
         self.session = session
         self.song = song
         self.autoplayOnLaunch = autoplay
+        _theme = State(initialValue: SongBackgroundThemeFactory.make(
+            artworkData: song.artworkData,
+            seed: Self.stableSeed(song.id),
+            mood: session.backgroundMood))
         self.onFinishDecision = onFinishDecision
         self.onAdvance = onAdvance
         self.onAutoplayChange = onAutoplayChange
@@ -281,9 +264,6 @@ struct GameSessionView: View {
                 engine.setAutoplay(true)
                 onAutoplayChange?(true)
             }
-        }
-        .task(id: session.id) {
-            await loadBackgroundTheme()
         }
         .onDisappear { engine.cleanup() }
         .onChange(of: engine.comboCount) { _, _ in

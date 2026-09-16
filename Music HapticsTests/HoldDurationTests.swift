@@ -113,6 +113,25 @@ final class HoldDurationTests: XCTestCase {
                        "half a 2 s hold held = half filled")
     }
 
+    func testEarlyBodyPressVisualProgressCompletesAtTail() {
+        // Starting on the visible body must immediately own the hold, and its
+        // visual fill must still reach completion at the chart tail instead of
+        // waiting for the head to reach the hit line first.
+        player.now = 2.2
+        let travel = PlayfieldGeometry.hitLineY - PlayfieldGeometry.topY
+        let bodyY = PlayfieldGeometry.hitLineY - travel * 0.5
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: Double(bodyY)))
+
+        let atPress = engine.holdVisualProgress(lane: 1, at: 2.2) ?? -1
+        let beforeTail = engine.holdVisualProgress(lane: 1, at: 4.9) ?? -1
+        let atTail = engine.holdVisualProgress(lane: 1, at: 5.0) ?? -1
+        XCTAssertEqual(atPress, 0, accuracy: 0.001)
+        XCTAssertGreaterThan(atPress, -0.001)
+        XCTAssertGreaterThan(beforeTail, atPress)
+        XCTAssertEqual(atTail, 1, accuracy: 0.001,
+                       "a hold started anywhere on its body must visually complete at its tail")
+    }
+
     func testEarlyReleaseBanksProportionalPoints() {
         player.now = 3.0
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))

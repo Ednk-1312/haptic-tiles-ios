@@ -7,7 +7,21 @@ struct HapticPianoApp: App {
     @StateObject private var settings: SettingsStore
     @StateObject private var mediaLibrary: MediaLibraryService
     @State private var appState: AppState
-    @State private var showOnboarding = !OnboardingStore.isComplete
+    /// Simulator launch flows such as `-demoAutoplay` present their own
+    /// gameplay cover. Do not present onboarding simultaneously, which causes
+    /// SwiftUI to queue a second full-screen presentation and emit an invalid
+    /// configuration warning before gameplay starts.
+    @State private var showOnboarding = !OnboardingStore.isComplete && !Self.isAutomationLaunch
+
+    private static var isAutomationLaunch: Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        return arguments.contains("-demoAutoplay")
+            || arguments.contains("-demoPassive")
+            || arguments.contains("-demoPreview")
+            || arguments.contains("-demoCalibration")
+            || arguments.contains("-demoReplay")
+            || arguments.contains("-demoFile")
+    }
 
     init() {
         let store = SettingsStore()
