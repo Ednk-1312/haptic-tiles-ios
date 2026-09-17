@@ -47,7 +47,8 @@ final class HoldDurationTests: XCTestCase {
                           nps: 0, duration: 12, difficultyScore: 5,
                           validationWarnings: [], generationDuration: 0)
         chart.notes = [ChartNote(id: 0, time: 3.0, lane: 1, duration: 2.0, type: .hold, strength: 0.8),
-                       ChartNote(id: 1, time: 9.0, lane: 3, duration: 0, type: .tap, strength: 0.5)]
+                       ChartNote(id: 1, time: 6.5, lane: 1, duration: 0, type: .tap, strength: 0.5),
+                       ChartNote(id: 2, time: 9.0, lane: 3, duration: 0, type: .tap, strength: 0.5)]
         return chart
     }
 
@@ -212,6 +213,24 @@ final class HoldDurationTests: XCTestCase {
 
         XCTAssertEqual(engine.holdState(for: 0), .completed,
                        "driver latency is projected once, not added to required finger time")
+    }
+
+    func testAutomaticHoldCompletionReleasesLaneForNextTap() {
+        player.now = 3.0
+        engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: PlayfieldGeometry.hitLineY))
+        XCTAssertTrue(engine.holdActive(lane: 1))
+
+        // The 60 Hz engine path completes the hold without waiting for touch-up.
+        player.now = 5.01
+        engine.tickForTesting()
+        XCTAssertFalse(engine.holdActive(lane: 1))
+
+        // A later note in the same lane must be accepted even if the original
+        // finger cancellation/touch-up callback never arrived.
+        player.now = 6.5
+        engine.handleTap(lane: 1)
+        XCTAssertEqual(engine.counts[.perfect], 2,
+                       "automatic completion must release the lane lock")
     }
 
     func testPauseCancelsActiveHoldWithoutMovingItsChartTail() {

@@ -963,6 +963,10 @@ final class GameEngine: ObservableObject {
 
     /// Sustained to the tail: configurable bonus + strong feedback.
     private func completeHold(hold: HoldTracker.Active, at time: Double) {
+        // Automatic 60 Hz completion has no touch-up event to release the
+        // physical lane lock. Always release it here; a later tap on the lane
+        // must be eligible even if UIKit never delivers the cancelled touch.
+        holdLaneLocks.remove(hold.lane)
         let before = score.score
         score.completeHold(bonus: settings.holdCompleteBonus)
         let points = score.score - before
@@ -1090,8 +1094,22 @@ final class GameEngine: ObservableObject {
         if !allowDiscontinuity, renderAnchorDate > 0, state == .playing {
             let elapsed = max(0, now - renderAnchorDate)
             let projectedAudio = renderAnchorAudio + elapsed * max(0, player.rate)
+            // Keep extrapolation continuous, but bound it to a small lead over
+            // the authoritative sampled clock. The old unbounded max could
+            // ratchet the anchor ahead forever after timer/audio jitter.
+            // A bounded lead lets the sampled clock catch up without changing
+            // note timestamps, scoring, or hit windows.
+            let maxLead = 0.08
             renderAnchorDate = now
-            renderAnchorAudio = max(sampledAudio, projectedAudio)
+            // If the sampled clock has advanced beyond our initial anchor,
+            // catch up immediately; otherwise a fresh run would remain near
+            // zero until the extrapolated clock reached the audio sample.
+            // Only the forward path is immediate. An over-ahead projection is
+            // bounded, preserving continuity while the sampled clock catches
+            // up naturally.
+            renderAnchorAudio = sampledAudio >= projectedAudio
+                ? sampledAudio
+                : min(projectedAudio, sampledAudio + maxLead)
         } else {
             renderAnchorDate = now
             renderAnchorAudio = sampledAudio

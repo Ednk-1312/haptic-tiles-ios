@@ -173,8 +173,13 @@ struct GameSessionView: View {
                 // the Dynamic Island from covering Pause, score, or progress
                 // controls on physical iPhones while preserving all four full-
                 // width lanes underneath.
-                .padding(.top, max(0, proxy.safeAreaInsets.top))
-                .padding(.bottom, max(0, proxy.safeAreaInsets.bottom))
+                // This stack is intentionally safe-area aware even though the
+                // playfield behind it is edge-to-edge. Reading insets from the
+                // outer GeometryReader after `.ignoresSafeArea` can yield zero
+                // on Dynamic-Island devices, placing Pause and score under the
+                // island. Let SwiftUI apply the actual container insets.
+                .safeAreaPadding(.top)
+                .safeAreaPadding(.bottom)
                 .frame(width: proxy.size.width, height: proxy.size.height,
                        alignment: .top)
             }

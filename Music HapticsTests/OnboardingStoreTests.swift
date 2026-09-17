@@ -13,6 +13,9 @@ final class OnboardingStoreTests: XCTestCase {
     }
 
     func testOnboardingStartsIncomplete() {
+        // Keep this assertion independent of test-method scheduling and any
+        // persisted defaults left by another test process.
+        OnboardingStore.reset()
         XCTAssertFalse(OnboardingStore.isComplete)
     }
 

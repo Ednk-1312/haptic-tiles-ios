@@ -22,8 +22,10 @@ enum OnboardingStore {
     #if DEBUG
     static func reset() {
         let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: completedKey)
-        defaults.removeObject(forKey: versionKey)
+        // Explicit values are more reliable than removeObject when the test
+        // runner has already materialized a persistent defaults domain.
+        defaults.set(false, forKey: completedKey)
+        defaults.set(0, forKey: versionKey)
         defaults.synchronize()
     }
     #endif

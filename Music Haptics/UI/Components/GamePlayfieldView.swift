@@ -443,7 +443,9 @@ struct GamePlayfieldView: View {
         context.stroke(beam, with: .color(.white.opacity(0.72)),
                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
         // Ring at the tail (the release point) — clamped INSIDE the body.
-        drawClampedTailRing(context, midX: rect.midX, tailY: rect.maxY,
+        // In this coordinate system the hold tail is the leading/top edge of
+        // the falling body. The head is the lower edge near the hit line.
+        drawClampedTailRing(context, midX: rect.midX, tailY: rect.minY,
                             width: width, bodyTop: rect.minY, bodyBottom: rect.maxY,
                             radius: width * 0.16)
         // Faint sheen so the long key separates from the black lanes.
@@ -472,18 +474,20 @@ struct GamePlayfieldView: View {
         // made before the chart head reaches the bottom line. The scored hold
         // interval still begins at the chart head, so this changes only the
         // feedback animation—not note timing, release tolerance, or bonus math.
+        // The moving tail already represents absolute hold progress. Do not
+        // multiply the changing rectangle height by a second progress value:
+        // that made the fill shrink as the tail approached the hit line. A
+        // coherent active hold is the projected body itself, with its tail
+        // marker moving monotonically from top to bottom.
         let visualFraction = min(1, max(0, engine.holdVisualProgress(
             lane: note.lane, at: time) ?? 0))
-        // Once the head has been caught it has passed the hit line and its
-        // projected bottom is below the playable field. Anchoring the fill to
-        // `rect.maxY` therefore hid the first part of the hold animation below
-        // the line; the player saw no progress until the tail arrived. The
-        // visible hold is anchored at the hit line, while its logical progress
-        // still comes from the authoritative audio clock.
+        let fillMinY = rect.minY
         let fillMaxY = min(rect.maxY, hitY)
-        let fillMinY = max(rect.minY, fillMaxY - rect.height * CGFloat(visualFraction))
         let fillHeight = max(0, fillMaxY - fillMinY)
-        // Unconsumed remainder above the fill keeps the black piano look.
+        // The body remains coherent while its absolute-time tail projection
+        // supplies the progress; `visualFraction` is retained for diagnostics
+        // and avoids a frame-counter animation.
+        _ = visualFraction
         let bodyGradient = Gradient(colors: [
             Color(red: 0.095, green: 0.095, blue: 0.12),
             Color(red: 0.015, green: 0.015, blue: 0.028)
@@ -509,12 +513,13 @@ struct GamePlayfieldView: View {
                                                                startPoint: CGPoint(x: fillRect.midX, y: fillRect.minY),
                                                                endPoint: CGPoint(x: fillRect.midX, y: fillRect.maxY)))
             clipped.fill(Path(fillRect), with: .color(.white.opacity(0.10)))
-            // Progress boundary marker riding the fill edge (inside the body).
-            let markerY = fillRect.minY
+            // The release tail is the top edge of the active body and moves
+            // only toward the hit line as absolute song time advances.
+            let markerY = rect.minY
             let marker = CGRect(x: rect.minX, y: markerY - 1.5, width: rect.width, height: 3)
             context.fill(Path(roundedRect: marker, cornerRadius: 1.5),
                          with: .color(.white.opacity(0.95)))
-            // Release ring rides the boundary — clamped inside the tile.
+            // Release ring rides the projected tail — clamped inside the tile.
             drawClampedTailRing(context, midX: rect.midX, tailY: markerY,
                                 width: rect.width, bodyTop: rect.minY, bodyBottom: rect.maxY,
                                 radius: rect.width * 0.16 * (1 + 0.15 * pulse))
