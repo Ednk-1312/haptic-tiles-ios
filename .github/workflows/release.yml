@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app | sort -V
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Build unsigned .ipa
+        run: |
+          set -euo pipefail
+          rm -rf build payload
+          mkdir -p payload/Payload
+          xcodebuild \
+            -project 'Music Haptics.xcodeproj' \
+            -scheme 'Music Haptics' \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= \
+            build
+          cp -R build/Build/Products/Release-iphoneos/*.app payload/Payload/
+          (cd payload && zip -qry ../HapticTiles-unsigned.ipa Payload)
+          ls -lh HapticTiles-unsigned.ipa
+
+      - name: Sanity-check the bundle
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' \
+            -c 'Print :CFBundleVersion' \
+            -c 'Print :CFBundleIdentifier' \
+            "$APP/Info.plist"
+          test -d "$APP/AITempo.mlmodelc" || { echo 'AITempo model missing!'; exit 1; }
+          test -d "$APP/AIDifficulty.mlmodelc" || { echo 'AIDifficulty model missing!'; exit 1; }
+
+      - name: Publish release (tag pushes only)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Haptic Tiles $TAG" --generate-notes
+          gh release upload "$TAG" \
+            HapticTiles-unsigned.ipa \
+            INSTALL.md \
+            --clobber
+
+      - name: Upload artifact (manual dispatch runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HapticTiles-unsigned
+          path: |
+            HapticTiles-unsigned.ipa
+            INSTALL.md

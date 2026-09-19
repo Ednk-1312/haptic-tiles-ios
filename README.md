@@ -23,6 +23,15 @@ to the audio clock so you can *feel* the rhythm.
 
 ---
 
+## Install the app (no Xcode needed)
+
+Grab the latest `.ipa` from the [Releases page](https://github.com/Ednk-1312/haptic-tiles-ios/releases)
+and follow **[INSTALL.md](INSTALL.md)**: AltStore or Sideloadly work on any
+iPhone; TrollStore only on specific exploitable iOS versions. No Xcode, no
+paid developer account, no jailbreak.
+
+---
+
 ## Quick start
 
 1. Open `Music Haptics.xcodeproj` in **Xcode 26 or later** (deployment target **iOS 26.0**; validated with the iOS 26 SDK).
