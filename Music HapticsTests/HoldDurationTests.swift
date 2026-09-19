@@ -148,18 +148,21 @@ final class HoldDurationTests: XCTestCase {
         XCTAssertEqual(engine.counts[.miss] ?? 0, 0)
     }
 
-    func testBodyCatchBeforeHeadDoesNotExtendPhysicalHold() {
+    func testBodyCatchBeforeHeadStartsPhysicalHoldImmediately() {
         // A visible body can be touched before the chart head reaches the
-        // line. The player must not be forced to hold from that early catch
-        // all the way to the tail.
+        // line. The physical hold begins at that successful touch, while the
+        // chart tail remains the fixed completion endpoint.
         player.now = 2.2
         let travel = PlayfieldGeometry.hitLineY - PlayfieldGeometry.topY
         let bodyY = PlayfieldGeometry.hitLineY - travel * 0.5
         engine.handleTap(lane: 1, point: CGPoint(x: 0.5, y: Double(bodyY)))
 
         XCTAssertTrue(engine.holdActive(lane: 1))
-        XCTAssertEqual(engine.holdStartTime(lane: 1) ?? -1, 3.0, accuracy: 0.001,
-                       "an early body catch must not extend the required physical duration")
+        XCTAssertEqual(engine.holdStartTime(lane: 1) ?? -1, 2.2, accuracy: 0.001,
+                       "a successful body catch starts progress immediately")
+        player.now = 2.9
+        XCTAssertEqual(engine.holdProgress(lane: 1) ?? -1, 0.7 / 2.8, accuracy: 0.01,
+                       "hold progress must use actual held duration from touch-down")
         XCTAssertEqual(engine.holdTailTime(lane: 1) ?? -1, 5.0, accuracy: 0.001,
                        "the chart tail remains authoritative")
     }

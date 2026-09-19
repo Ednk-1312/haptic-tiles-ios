@@ -471,9 +471,9 @@ struct GamePlayfieldView: View {
         // fraction is what makes a slow → fast → slow hold look continuous
         // instead of advancing at a static speed.
         // The visual fill begins at the physical press, including a body press
-        // made before the chart head reaches the bottom line. The scored hold
-        // interval still begins at the chart head, so this changes only the
-        // feedback animation—not note timing, release tolerance, or bonus math.
+        // made before the chart head reaches the bottom line. The same
+        // touch-to-tail interval is used by the hold tracker, so this is visual
+        // feedback for the actual sustain rather than a separate timer.
         // The moving tail already represents absolute hold progress. Do not
         // multiply the changing rectangle height by a second progress value:
         // that made the fill shrink as the tail approached the hit line. A
@@ -481,13 +481,14 @@ struct GamePlayfieldView: View {
         // marker moving monotonically from top to bottom.
         let visualFraction = min(1, max(0, engine.holdVisualProgress(
             lane: note.lane, at: time) ?? 0))
-        let fillMinY = rect.minY
+        // Keep the dark body at its projected size, then fill only the
+        // fraction that the player has actually held. The previous code filled
+        // `rect.minY...rect.maxY` unconditionally, so every successful touch
+        // made the whole hold look complete on the first frame.
         let fillMaxY = min(rect.maxY, hitY)
-        let fillHeight = max(0, fillMaxY - fillMinY)
-        // The body remains coherent while its absolute-time tail projection
-        // supplies the progress; `visualFraction` is retained for diagnostics
-        // and avoids a frame-counter animation.
-        _ = visualFraction
+        let availableHeight = max(0, fillMaxY - rect.minY)
+        let fillHeight = availableHeight * CGFloat(visualFraction)
+        let fillMinY = fillMaxY - fillHeight
         let bodyGradient = Gradient(colors: [
             Color(red: 0.095, green: 0.095, blue: 0.12),
             Color(red: 0.015, green: 0.015, blue: 0.028)

@@ -940,13 +940,14 @@ final class GameEngine: ObservableObject {
         let pressTime = isAutoplay
             ? rawPressTime
             : projectionTime(for: rawPressTime)
-        // A spatial body catch may happen before the chart head reaches the
-        // line. Keep the chart tail authoritative and begin the measured
-        // sustain at the actual press for the remaining interval.
-        let sustainStartTime = max(hit.note.time, pressTime)
-        guard sustainStartTime < endTime else { return }
+        // The physical hold interval begins at the successful touch, including
+        // a valid body catch before the head reaches the line. The chart tail
+        // remains authoritative, so the same interval drives gameplay progress
+        // and the renderer: held duration is never silently discarded and the
+        // tail can never be extended past its musical endpoint.
+        guard pressTime < endTime else { return }
         guard holds.start(lane: hit.note.lane, index: hit.index, noteID: hit.note.id,
-                          startTime: sustainStartTime, endTime: endTime,
+                          startTime: pressTime, endTime: endTime,
                           pressTime: pressTime) != nil else { return }
         holdLaneLocks.insert(hit.note.lane)
         if let pattern = HapticPatternGenerator.holdStartPattern(profile: hapticProfile,
@@ -955,8 +956,8 @@ final class GameEngine: ObservableObject {
             haptics.play(pattern)
         }
         #if DEBUG
-        print(String(format: "[Hold] lane=%d press=%.3fs sustainStart=%.3fs head=%.3fs tail=%.3fs musical=%.3fs",
-                     hit.note.lane, pressTime, sustainStartTime, hit.note.time,
+        print(String(format: "[Hold] lane=%d press=%.3fs holdStart=%.3fs head=%.3fs tail=%.3fs musical=%.3fs",
+                     hit.note.lane, pressTime, pressTime, hit.note.time,
                      endTime, hit.note.duration))
         #endif
     }

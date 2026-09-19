@@ -380,6 +380,24 @@ struct GameSessionView: View {
                 }
                 .accessibilityLabel("Pause")
 
+                // Exit is available during active play as well as from the
+                // pause sheet. Cleaning the engine before dismissal prevents
+                // audio, haptics, timers, and held-lane state from surviving
+                // when the view is removed.
+                Button {
+                    engine.cleanup()
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.title3.weight(.bold))
+                        .frame(width: 46, height: 46)
+                        .background(Color.black.opacity(0.6), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.28), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+                }
+                .accessibilityLabel("Exit game")
+                .accessibilityHint("Stops gameplay and returns to the library")
+
                 if engine.isPractice {
                     Text("PRACTICE")
                         .font(.system(size: 9, weight: .heavy).monospaced())
