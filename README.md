@@ -23,6 +23,20 @@ to the audio clock so you can *feel* the rhythm.
 
 ---
 
+## Screenshots & Gameplay
+
+![Haptic Piano gameplay](.github/assets/gameplay-hero.png)
+
+Real gameplay captured from the iOS Simulator:
+
+![Haptic Piano gameplay animation](.github/assets/gameplay.gif)
+
+*End-of-song results:*
+
+![Results](.github/assets/results.png)
+
+---
+
 ## Install the app (no Xcode needed)
 
 Grab the latest `.ipa` from the [Releases page](https://github.com/Ednk-1312/haptic-tiles-ios/releases)
